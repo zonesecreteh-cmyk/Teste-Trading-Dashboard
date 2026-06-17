@@ -1,0 +1,196 @@
+{
+  "asset": "EWQ",
+  "label": "FR EWQ",
+  "spot": 46.11,
+  "version": "2026-06-17-l",
+  "timestamp": "2026-06-17T20:00:28+00:00",
+  "gex_total_musd": -0.3,
+  "gex_regime": "AMPLIFICATION (cassure)",
+  "dex_total_musd": 1.6,
+  "dex_flux": "haussier",
+  "max_pain": 45.0,
+  "max_pain_vs_spot_pct": -2.41,
+  "gamma_flip": 41.06,
+  "rr_weekly": -48.88,
+  "rr_monthly": null,
+  "term_regime": "BACKWARDATION — stress détecté",
+  "iv_percentile": null,
+  "iv_history_points": 1,
+  "term_curve": [
+    {
+      "days": 1,
+      "atm_iv": 67.2
+    },
+    {
+      "days": 30,
+      "atm_iv": 23.3
+    },
+    {
+      "days": 93,
+      "atm_iv": 22.8
+    },
+    {
+      "days": 184,
+      "atm_iv": 22.0
+    }
+  ],
+  "gex_by_strike": [
+    {
+      "strike": 30.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 35.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 39.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 40.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 41.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 42.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 43.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 44.0,
+      "gex_musd": -0.15
+    },
+    {
+      "strike": 45.0,
+      "gex_musd": -0.08
+    },
+    {
+      "strike": 46.0,
+      "gex_musd": -0.12
+    },
+    {
+      "strike": 47.0,
+      "gex_musd": 0.03
+    },
+    {
+      "strike": 48.0,
+      "gex_musd": 0.04
+    },
+    {
+      "strike": 49.0,
+      "gex_musd": 0.01
+    },
+    {
+      "strike": 50.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 52.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 55.0,
+      "gex_musd": 0.0
+    }
+  ],
+  "n_options": 44,
+  "history": [
+    {
+      "date": "2026-06-17",
+      "dex": 1.6,
+      "gex": -0.3
+    }
+  ],
+  "convergence": {
+    "score": -3.4,
+    "direction": "BAISSIER",
+    "conviction": "FAIBLE",
+    "aligned": 2,
+    "bulls": 0,
+    "bears": 2,
+    "stress": 7.5,
+    "stress_label": "ÉLEVÉ",
+    "sizing": 0.38,
+    "levels": {
+      "L1_REGIME": {
+        "verdict": "NEUTRAL",
+        "strength": 0.3,
+        "reason": "Gamma négatif : amplification, pas d'ancrage directionnel"
+      },
+      "L2_POSITIONING": {
+        "verdict": "BEAR",
+        "strength": 1.0,
+        "reason": "Risk reversal -48.88 : puts biddés, couverture institutionnelle"
+      },
+      "L3_STRUCTURE": {
+        "verdict": "BEAR",
+        "strength": 0.7,
+        "reason": "Backwardation : stress immédiat anticipé"
+      },
+      "L4_LIQUIDITE": {
+        "verdict": "NEUTRAL",
+        "strength": 0.0,
+        "reason": "Historique IV insuffisant (percentile en construction)"
+      },
+      "L5_CATALYST": {
+        "verdict": "NEUTRAL",
+        "strength": 0.0,
+        "reason": "Aucun catalyseur connu (à brancher)"
+      }
+    }
+  },
+  "charm_musd": 0.5,
+  "vanna_musd": 0.0,
+  "scenario_matrix": [
+    {
+      "move_pct": -10.0,
+      "target": 41.5,
+      "flow_musd": -2.3
+    },
+    {
+      "move_pct": -5.0,
+      "target": 43.8,
+      "flow_musd": -1.6
+    },
+    {
+      "move_pct": -2.0,
+      "target": 45.19,
+      "flow_musd": -0.6
+    },
+    {
+      "move_pct": 0.0,
+      "target": 46.11,
+      "flow_musd": -0.0
+    },
+    {
+      "move_pct": 2.0,
+      "target": 47.03,
+      "flow_musd": 0.4
+    },
+    {
+      "move_pct": 5.0,
+      "target": 48.42,
+      "flow_musd": 0.5
+    },
+    {
+      "move_pct": 10.0,
+      "target": 50.72,
+      "flow_musd": -0.1
+    }
+  ],
+  "iv30": 23.3,
+  "rv30": null,
+  "funding": null,
+  "coinbase_premium": null,
+  "oi_by_exchange": null,
+  "block_trades": null,
+  "oi_change_24h": null,
+  "stablecoin_supply": null
+}

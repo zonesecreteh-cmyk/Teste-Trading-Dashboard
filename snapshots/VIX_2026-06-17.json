@@ -1,0 +1,293 @@
+{
+  "asset": "VIX",
+  "label": "VIX",
+  "spot": 18.74,
+  "version": "2026-06-17-l",
+  "timestamp": "2026-06-17T20:00:25+00:00",
+  "gex_total_musd": -7.8,
+  "gex_regime": "AMPLIFICATION (cassure)",
+  "dex_total_musd": 150.8,
+  "dex_flux": "haussier",
+  "max_pain": 21.5,
+  "max_pain_vs_spot_pct": 14.73,
+  "gamma_flip": 21.65,
+  "rr_weekly": 62.75,
+  "rr_monthly": 160.57,
+  "term_regime": "BACKWARDATION — stress détecté",
+  "iv_percentile": 50,
+  "iv_history_points": 2,
+  "term_curve": [
+    {
+      "days": 7,
+      "atm_iv": 117.7
+    },
+    {
+      "days": 14,
+      "atm_iv": 122.5
+    },
+    {
+      "days": 21,
+      "atm_iv": 187.9
+    },
+    {
+      "days": 28,
+      "atm_iv": 182.4
+    },
+    {
+      "days": 35,
+      "atm_iv": 76.7
+    },
+    {
+      "days": 63,
+      "atm_iv": 72.2
+    },
+    {
+      "days": 91,
+      "atm_iv": 65.6
+    },
+    {
+      "days": 126,
+      "atm_iv": 60.3
+    },
+    {
+      "days": 154,
+      "atm_iv": 54.8
+    }
+  ],
+  "gex_by_strike": [
+    {
+      "strike": 10.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 10.5,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 11.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 11.5,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 12.0,
+      "gex_musd": -0.01
+    },
+    {
+      "strike": 12.5,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 13.0,
+      "gex_musd": -0.03
+    },
+    {
+      "strike": 13.5,
+      "gex_musd": -0.01
+    },
+    {
+      "strike": 14.0,
+      "gex_musd": -0.06
+    },
+    {
+      "strike": 14.5,
+      "gex_musd": -0.13
+    },
+    {
+      "strike": 15.0,
+      "gex_musd": -1.56
+    },
+    {
+      "strike": 15.5,
+      "gex_musd": -0.47
+    },
+    {
+      "strike": 16.0,
+      "gex_musd": -3.74
+    },
+    {
+      "strike": 16.5,
+      "gex_musd": -0.81
+    },
+    {
+      "strike": 17.0,
+      "gex_musd": -5.07
+    },
+    {
+      "strike": 17.5,
+      "gex_musd": -0.53
+    },
+    {
+      "strike": 18.0,
+      "gex_musd": -5.36
+    },
+    {
+      "strike": 18.5,
+      "gex_musd": -0.37
+    },
+    {
+      "strike": 19.0,
+      "gex_musd": -3.64
+    },
+    {
+      "strike": 19.5,
+      "gex_musd": -0.47
+    },
+    {
+      "strike": 20.0,
+      "gex_musd": -3.67
+    },
+    {
+      "strike": 20.5,
+      "gex_musd": -0.16
+    },
+    {
+      "strike": 21.0,
+      "gex_musd": -1.08
+    },
+    {
+      "strike": 21.5,
+      "gex_musd": 0.05
+    },
+    {
+      "strike": 22.0,
+      "gex_musd": 0.8
+    },
+    {
+      "strike": 22.5,
+      "gex_musd": 0.43
+    },
+    {
+      "strike": 23.0,
+      "gex_musd": 1.74
+    },
+    {
+      "strike": 23.5,
+      "gex_musd": 0.6
+    },
+    {
+      "strike": 24.0,
+      "gex_musd": 4.93
+    },
+    {
+      "strike": 24.5,
+      "gex_musd": 0.23
+    },
+    {
+      "strike": 25.0,
+      "gex_musd": 5.59
+    },
+    {
+      "strike": 26.0,
+      "gex_musd": 1.83
+    },
+    {
+      "strike": 27.0,
+      "gex_musd": 1.65
+    },
+    {
+      "strike": 28.0,
+      "gex_musd": 1.5
+    }
+  ],
+  "n_options": 445,
+  "history": [
+    {
+      "date": "2026-06-16",
+      "dex": -2151.4,
+      "gex": -60.7
+    },
+    {
+      "date": "2026-06-17",
+      "dex": 150.8,
+      "gex": -7.8
+    }
+  ],
+  "convergence": {
+    "score": 0.6,
+    "direction": "NEUTRE",
+    "conviction": "NEUTRE",
+    "aligned": 1,
+    "bulls": 1,
+    "bears": 1,
+    "stress": 7.5,
+    "stress_label": "ÉLEVÉ",
+    "sizing": 0.0,
+    "levels": {
+      "L1_REGIME": {
+        "verdict": "NEUTRAL",
+        "strength": 0.3,
+        "reason": "Gamma négatif : amplification, pas d'ancrage directionnel"
+      },
+      "L2_POSITIONING": {
+        "verdict": "BULL",
+        "strength": 1.0,
+        "reason": "Risk reversal 160.57 : appétit call, optimisme"
+      },
+      "L3_STRUCTURE": {
+        "verdict": "BEAR",
+        "strength": 0.7,
+        "reason": "Backwardation : stress immédiat anticipé"
+      },
+      "L4_LIQUIDITE": {
+        "verdict": "NEUTRAL",
+        "strength": 0.2,
+        "reason": "IV percentile 50 : régime médian"
+      },
+      "L5_CATALYST": {
+        "verdict": "NEUTRAL",
+        "strength": 0.0,
+        "reason": "Aucun catalyseur connu (à brancher)"
+      }
+    }
+  },
+  "charm_musd": 9.1,
+  "vanna_musd": 8.6,
+  "scenario_matrix": [
+    {
+      "move_pct": -10.0,
+      "target": 16.87,
+      "flow_musd": -180.1
+    },
+    {
+      "move_pct": -5.0,
+      "target": 17.8,
+      "flow_musd": -81.4
+    },
+    {
+      "move_pct": -2.0,
+      "target": 18.37,
+      "flow_musd": -30.2
+    },
+    {
+      "move_pct": 0.0,
+      "target": 18.74,
+      "flow_musd": -0.0
+    },
+    {
+      "move_pct": 2.0,
+      "target": 19.11,
+      "flow_musd": 26.8
+    },
+    {
+      "move_pct": 5.0,
+      "target": 19.68,
+      "flow_musd": 60.5
+    },
+    {
+      "move_pct": 10.0,
+      "target": 20.61,
+      "flow_musd": 98.9
+    }
+  ],
+  "iv30": 182.4,
+  "rv30": null,
+  "funding": null,
+  "coinbase_premium": null,
+  "oi_by_exchange": null,
+  "block_trades": null,
+  "oi_change_24h": null,
+  "stablecoin_supply": null
+}

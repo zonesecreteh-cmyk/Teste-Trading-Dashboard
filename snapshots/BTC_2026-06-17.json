@@ -1,0 +1,389 @@
+{
+  "asset": "BTC",
+  "label": "BTC",
+  "spot": 64249.69,
+  "version": "2026-06-17-l",
+  "timestamp": "2026-06-17T20:00:02+00:00",
+  "gex_total_musd": -53.7,
+  "gex_regime": "AMPLIFICATION (cassure)",
+  "dex_total_musd": -2337.9,
+  "dex_flux": "baissier",
+  "max_pain": 70000.0,
+  "max_pain_vs_spot_pct": 8.95,
+  "gamma_flip": 65574.13,
+  "rr_weekly": -6.13,
+  "rr_monthly": -5.96,
+  "term_regime": "BACKWARDATION — stress détecté",
+  "iv_percentile": 100,
+  "iv_history_points": 2,
+  "term_curve": [
+    {
+      "days": 1,
+      "atm_iv": 43.8
+    },
+    {
+      "days": 2,
+      "atm_iv": 39.9
+    },
+    {
+      "days": 3,
+      "atm_iv": 36.4
+    },
+    {
+      "days": 8,
+      "atm_iv": 38.8
+    },
+    {
+      "days": 15,
+      "atm_iv": 38.5
+    },
+    {
+      "days": 43,
+      "atm_iv": 38.2
+    },
+    {
+      "days": 71,
+      "atm_iv": 38.7
+    },
+    {
+      "days": 99,
+      "atm_iv": 39.5
+    },
+    {
+      "days": 190,
+      "atm_iv": 42.7
+    }
+  ],
+  "gex_by_strike": [
+    {
+      "strike": 35000.0,
+      "gex_musd": -0.45
+    },
+    {
+      "strike": 40000.0,
+      "gex_musd": -1.71
+    },
+    {
+      "strike": 45000.0,
+      "gex_musd": -1.6
+    },
+    {
+      "strike": 46000.0,
+      "gex_musd": -0.13
+    },
+    {
+      "strike": 48000.0,
+      "gex_musd": -0.09
+    },
+    {
+      "strike": 50000.0,
+      "gex_musd": -5.07
+    },
+    {
+      "strike": 52000.0,
+      "gex_musd": -1.25
+    },
+    {
+      "strike": 53000.0,
+      "gex_musd": -0.03
+    },
+    {
+      "strike": 54000.0,
+      "gex_musd": -1.51
+    },
+    {
+      "strike": 55000.0,
+      "gex_musd": -6.47
+    },
+    {
+      "strike": 56000.0,
+      "gex_musd": -1.47
+    },
+    {
+      "strike": 57000.0,
+      "gex_musd": -1.87
+    },
+    {
+      "strike": 58000.0,
+      "gex_musd": -6.3
+    },
+    {
+      "strike": 59000.0,
+      "gex_musd": -4.18
+    },
+    {
+      "strike": 60000.0,
+      "gex_musd": -27.31
+    },
+    {
+      "strike": 61000.0,
+      "gex_musd": -5.63
+    },
+    {
+      "strike": 62000.0,
+      "gex_musd": -21.29
+    },
+    {
+      "strike": 62500.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 63000.0,
+      "gex_musd": -12.69
+    },
+    {
+      "strike": 63500.0,
+      "gex_musd": -2.81
+    },
+    {
+      "strike": 64000.0,
+      "gex_musd": -15.49
+    },
+    {
+      "strike": 64500.0,
+      "gex_musd": -2.5
+    },
+    {
+      "strike": 65000.0,
+      "gex_musd": -8.3
+    },
+    {
+      "strike": 65500.0,
+      "gex_musd": -2.23
+    },
+    {
+      "strike": 66000.0,
+      "gex_musd": 4.27
+    },
+    {
+      "strike": 66500.0,
+      "gex_musd": 0.9
+    },
+    {
+      "strike": 67000.0,
+      "gex_musd": 11.53
+    },
+    {
+      "strike": 67500.0,
+      "gex_musd": 0.31
+    },
+    {
+      "strike": 68000.0,
+      "gex_musd": 4.37
+    },
+    {
+      "strike": 68500.0,
+      "gex_musd": 0.03
+    },
+    {
+      "strike": 69000.0,
+      "gex_musd": 2.84
+    },
+    {
+      "strike": 70000.0,
+      "gex_musd": 7.28
+    },
+    {
+      "strike": 71000.0,
+      "gex_musd": 2.86
+    },
+    {
+      "strike": 72000.0,
+      "gex_musd": 4.7
+    },
+    {
+      "strike": 73000.0,
+      "gex_musd": 0.56
+    },
+    {
+      "strike": 74000.0,
+      "gex_musd": 1.28
+    },
+    {
+      "strike": 75000.0,
+      "gex_musd": 4.31
+    },
+    {
+      "strike": 76000.0,
+      "gex_musd": 2.56
+    },
+    {
+      "strike": 77000.0,
+      "gex_musd": 1.05
+    },
+    {
+      "strike": 78000.0,
+      "gex_musd": 3.02
+    },
+    {
+      "strike": 79000.0,
+      "gex_musd": 0.18
+    },
+    {
+      "strike": 80000.0,
+      "gex_musd": 10.97
+    },
+    {
+      "strike": 81000.0,
+      "gex_musd": 0.84
+    },
+    {
+      "strike": 82000.0,
+      "gex_musd": 2.98
+    },
+    {
+      "strike": 83000.0,
+      "gex_musd": 0.5
+    },
+    {
+      "strike": 84000.0,
+      "gex_musd": 1.05
+    },
+    {
+      "strike": 85000.0,
+      "gex_musd": 1.87
+    },
+    {
+      "strike": 86000.0,
+      "gex_musd": 0.58
+    },
+    {
+      "strike": 87000.0,
+      "gex_musd": 0.06
+    },
+    {
+      "strike": 88000.0,
+      "gex_musd": 1.45
+    },
+    {
+      "strike": 89000.0,
+      "gex_musd": 0.03
+    },
+    {
+      "strike": 90000.0,
+      "gex_musd": 2.27
+    },
+    {
+      "strike": 91000.0,
+      "gex_musd": 0.04
+    },
+    {
+      "strike": 92000.0,
+      "gex_musd": 0.38
+    },
+    {
+      "strike": 93000.0,
+      "gex_musd": 0.01
+    },
+    {
+      "strike": 94000.0,
+      "gex_musd": 0.25
+    },
+    {
+      "strike": 95000.0,
+      "gex_musd": 1.15
+    },
+    {
+      "strike": 96000.0,
+      "gex_musd": 0.23
+    }
+  ],
+  "n_options": 563,
+  "history": [
+    {
+      "date": "2026-06-16",
+      "dex": -1569.8,
+      "gex": 11.0
+    },
+    {
+      "date": "2026-06-17",
+      "dex": -2337.9,
+      "gex": -53.7
+    }
+  ],
+  "convergence": {
+    "score": -4.6,
+    "direction": "BAISSIER",
+    "conviction": "MODÉRÉE",
+    "aligned": 3,
+    "bulls": 0,
+    "bears": 3,
+    "stress": 10.0,
+    "stress_label": "ÉLEVÉ",
+    "sizing": 0.42,
+    "levels": {
+      "L1_REGIME": {
+        "verdict": "NEUTRAL",
+        "strength": 0.3,
+        "reason": "Gamma négatif : amplification, pas d'ancrage directionnel"
+      },
+      "L2_POSITIONING": {
+        "verdict": "BEAR",
+        "strength": 1.0,
+        "reason": "Risk reversal -5.96 : puts biddés, couverture institutionnelle"
+      },
+      "L3_STRUCTURE": {
+        "verdict": "BEAR",
+        "strength": 0.7,
+        "reason": "Backwardation : stress immédiat anticipé"
+      },
+      "L4_LIQUIDITE": {
+        "verdict": "BEAR",
+        "strength": 0.6,
+        "reason": "IV percentile 100 : vol haute, stress de liquidité"
+      },
+      "L5_CATALYST": {
+        "verdict": "NEUTRAL",
+        "strength": 0.0,
+        "reason": "Aucun catalyseur connu (à brancher)"
+      }
+    }
+  },
+  "charm_musd": 70.0,
+  "vanna_musd": 46.7,
+  "scenario_matrix": [
+    {
+      "move_pct": -10.0,
+      "target": 57824.72,
+      "flow_musd": -1017.8
+    },
+    {
+      "move_pct": -5.0,
+      "target": 61037.21,
+      "flow_musd": -463.2
+    },
+    {
+      "move_pct": -2.0,
+      "target": 62964.7,
+      "flow_musd": -147.8
+    },
+    {
+      "move_pct": 0.0,
+      "target": 64249.69,
+      "flow_musd": -0.0
+    },
+    {
+      "move_pct": 2.0,
+      "target": 65534.68,
+      "flow_musd": 57.1
+    },
+    {
+      "move_pct": 5.0,
+      "target": 67462.17,
+      "flow_musd": -47.7
+    },
+    {
+      "move_pct": 10.0,
+      "target": 70674.66,
+      "flow_musd": -535.3
+    }
+  ],
+  "iv30": 38.2,
+  "rv30": null,
+  "funding": null,
+  "coinbase_premium": null,
+  "oi_by_exchange": null,
+  "block_trades": null,
+  "oi_change_24h": null,
+  "stablecoin_supply": null
+}

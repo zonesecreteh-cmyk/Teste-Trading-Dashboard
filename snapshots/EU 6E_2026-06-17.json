@@ -1,0 +1,276 @@
+{
+  "asset": "EU 6E",
+  "label": "EU 6E",
+  "spot": 107.12,
+  "version": "2026-06-17-l",
+  "timestamp": "2026-06-17T20:00:34+00:00",
+  "gex_total_musd": -22.5,
+  "gex_regime": "AMPLIFICATION (cassure)",
+  "dex_total_musd": -34.4,
+  "dex_flux": "baissier",
+  "max_pain": 107.0,
+  "max_pain_vs_spot_pct": -0.11,
+  "gamma_flip": 111.43,
+  "rr_weekly": -2.34,
+  "rr_monthly": 0.75,
+  "term_regime": "CONTANGO — calme, pas de stress immédiat",
+  "iv_percentile": null,
+  "iv_history_points": 1,
+  "term_curve": [
+    {
+      "days": 1,
+      "atm_iv": 8.9
+    },
+    {
+      "days": 30,
+      "atm_iv": 5.2
+    },
+    {
+      "days": 93,
+      "atm_iv": 5.4
+    },
+    {
+      "days": 184,
+      "atm_iv": 9.6
+    }
+  ],
+  "gex_by_strike": [
+    {
+      "strike": 90.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 93.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 94.0,
+      "gex_musd": -0.01
+    },
+    {
+      "strike": 95.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 96.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 97.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 98.0,
+      "gex_musd": -0.01
+    },
+    {
+      "strike": 99.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 100.0,
+      "gex_musd": -0.25
+    },
+    {
+      "strike": 101.0,
+      "gex_musd": 0.01
+    },
+    {
+      "strike": 102.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 103.0,
+      "gex_musd": -0.05
+    },
+    {
+      "strike": 104.0,
+      "gex_musd": 0.06
+    },
+    {
+      "strike": 105.0,
+      "gex_musd": -11.46
+    },
+    {
+      "strike": 106.0,
+      "gex_musd": -1.13
+    },
+    {
+      "strike": 107.0,
+      "gex_musd": -11.31
+    },
+    {
+      "strike": 108.0,
+      "gex_musd": 0.51
+    },
+    {
+      "strike": 109.0,
+      "gex_musd": 0.28
+    },
+    {
+      "strike": 110.0,
+      "gex_musd": 0.31
+    },
+    {
+      "strike": 111.0,
+      "gex_musd": 0.06
+    },
+    {
+      "strike": 112.0,
+      "gex_musd": 0.2
+    },
+    {
+      "strike": 113.0,
+      "gex_musd": 0.03
+    },
+    {
+      "strike": 114.0,
+      "gex_musd": 0.07
+    },
+    {
+      "strike": 115.0,
+      "gex_musd": 0.07
+    },
+    {
+      "strike": 116.0,
+      "gex_musd": 0.01
+    },
+    {
+      "strike": 117.0,
+      "gex_musd": 0.01
+    },
+    {
+      "strike": 118.0,
+      "gex_musd": 0.01
+    },
+    {
+      "strike": 119.0,
+      "gex_musd": 0.06
+    },
+    {
+      "strike": 120.0,
+      "gex_musd": 0.01
+    },
+    {
+      "strike": 121.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 122.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 125.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 130.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 135.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 140.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 145.0,
+      "gex_musd": 0.0
+    }
+  ],
+  "n_options": 147,
+  "history": [
+    {
+      "date": "2026-06-17",
+      "dex": -34.4,
+      "gex": -22.5
+    }
+  ],
+  "convergence": {
+    "score": 0.8,
+    "direction": "NEUTRE",
+    "conviction": "NEUTRE",
+    "aligned": 1,
+    "bulls": 1,
+    "bears": 0,
+    "stress": 5.0,
+    "stress_label": "NORMAL",
+    "sizing": 0.0,
+    "levels": {
+      "L1_REGIME": {
+        "verdict": "NEUTRAL",
+        "strength": 0.3,
+        "reason": "Gamma négatif : amplification, pas d'ancrage directionnel"
+      },
+      "L2_POSITIONING": {
+        "verdict": "NEUTRAL",
+        "strength": 0.3,
+        "reason": "Risk reversal 0.75 : skew neutre"
+      },
+      "L3_STRUCTURE": {
+        "verdict": "BULL",
+        "strength": 0.4,
+        "reason": "Contango : pas de stress, conditions calmes"
+      },
+      "L4_LIQUIDITE": {
+        "verdict": "NEUTRAL",
+        "strength": 0.0,
+        "reason": "Historique IV insuffisant (percentile en construction)"
+      },
+      "L5_CATALYST": {
+        "verdict": "NEUTRAL",
+        "strength": 0.0,
+        "reason": "Aucun catalyseur connu (à brancher)"
+      }
+    }
+  },
+  "charm_musd": 3.5,
+  "vanna_musd": 4.3,
+  "scenario_matrix": [
+    {
+      "move_pct": -10.0,
+      "target": 96.41,
+      "flow_musd": -109.6
+    },
+    {
+      "move_pct": -5.0,
+      "target": 101.76,
+      "flow_musd": -91.6
+    },
+    {
+      "move_pct": -2.0,
+      "target": 104.98,
+      "flow_musd": -45.5
+    },
+    {
+      "move_pct": 0.0,
+      "target": 107.12,
+      "flow_musd": -0.0
+    },
+    {
+      "move_pct": 2.0,
+      "target": 109.26,
+      "flow_musd": 22.2
+    },
+    {
+      "move_pct": 5.0,
+      "target": 112.48,
+      "flow_musd": 25.9
+    },
+    {
+      "move_pct": 10.0,
+      "target": 117.83,
+      "flow_musd": 19.0
+    }
+  ],
+  "iv30": 5.2,
+  "rv30": null,
+  "funding": null,
+  "coinbase_premium": null,
+  "oi_by_exchange": null,
+  "block_trades": null,
+  "oi_change_24h": null,
+  "stablecoin_supply": null
+}

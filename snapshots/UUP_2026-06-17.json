@@ -1,0 +1,232 @@
+{
+  "asset": "UUP",
+  "label": "UUP",
+  "spot": 27.97,
+  "version": "2026-06-17-l",
+  "timestamp": "2026-06-17T20:00:27+00:00",
+  "gex_total_musd": 73.0,
+  "gex_regime": "ANCRAGE (range)",
+  "dex_total_musd": 73.5,
+  "dex_flux": "haussier",
+  "max_pain": 28.0,
+  "max_pain_vs_spot_pct": 0.11,
+  "gamma_flip": 27.19,
+  "rr_weekly": 8.38,
+  "rr_monthly": -2.27,
+  "term_regime": "BACKWARDATION — stress détecté",
+  "iv_percentile": null,
+  "iv_history_points": 1,
+  "term_curve": [
+    {
+      "days": 1,
+      "atm_iv": 11.6
+    },
+    {
+      "days": 30,
+      "atm_iv": 7.3
+    },
+    {
+      "days": 93,
+      "atm_iv": 7.1
+    },
+    {
+      "days": 184,
+      "atm_iv": 7.7
+    },
+    {
+      "days": 212,
+      "atm_iv": 6.0
+    },
+    {
+      "days": 583,
+      "atm_iv": 9.8
+    }
+  ],
+  "gex_by_strike": [
+    {
+      "strike": 15.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 18.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 19.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 20.0,
+      "gex_musd": -0.01
+    },
+    {
+      "strike": 21.0,
+      "gex_musd": -0.0
+    },
+    {
+      "strike": 22.0,
+      "gex_musd": -0.01
+    },
+    {
+      "strike": 23.0,
+      "gex_musd": -0.01
+    },
+    {
+      "strike": 24.0,
+      "gex_musd": -0.02
+    },
+    {
+      "strike": 25.0,
+      "gex_musd": -0.16
+    },
+    {
+      "strike": 26.0,
+      "gex_musd": -1.3
+    },
+    {
+      "strike": 27.0,
+      "gex_musd": -3.08
+    },
+    {
+      "strike": 28.0,
+      "gex_musd": 63.6
+    },
+    {
+      "strike": 29.0,
+      "gex_musd": 11.63
+    },
+    {
+      "strike": 30.0,
+      "gex_musd": 2.25
+    },
+    {
+      "strike": 31.0,
+      "gex_musd": 0.06
+    },
+    {
+      "strike": 32.0,
+      "gex_musd": 0.03
+    },
+    {
+      "strike": 33.0,
+      "gex_musd": 0.02
+    },
+    {
+      "strike": 34.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 35.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 36.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 37.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 38.0,
+      "gex_musd": 0.0
+    },
+    {
+      "strike": 40.0,
+      "gex_musd": 0.01
+    }
+  ],
+  "n_options": 117,
+  "history": [
+    {
+      "date": "2026-06-17",
+      "dex": 73.5,
+      "gex": 73.0
+    }
+  ],
+  "convergence": {
+    "score": -2.3,
+    "direction": "NEUTRE",
+    "conviction": "NEUTRE",
+    "aligned": 2,
+    "bulls": 0,
+    "bears": 2,
+    "stress": 7.5,
+    "stress_label": "ÉLEVÉ",
+    "sizing": 0.0,
+    "levels": {
+      "L1_REGIME": {
+        "verdict": "NEUTRAL",
+        "strength": 0.4,
+        "reason": "Spot collé au max pain, pas de cible nette"
+      },
+      "L2_POSITIONING": {
+        "verdict": "BEAR",
+        "strength": 0.454,
+        "reason": "Risk reversal -2.27 : puts biddés, couverture institutionnelle"
+      },
+      "L3_STRUCTURE": {
+        "verdict": "BEAR",
+        "strength": 0.7,
+        "reason": "Backwardation : stress immédiat anticipé"
+      },
+      "L4_LIQUIDITE": {
+        "verdict": "NEUTRAL",
+        "strength": 0.0,
+        "reason": "Historique IV insuffisant (percentile en construction)"
+      },
+      "L5_CATALYST": {
+        "verdict": "NEUTRAL",
+        "strength": 0.0,
+        "reason": "Aucun catalyseur connu (à brancher)"
+      }
+    }
+  },
+  "charm_musd": 4.5,
+  "vanna_musd": 8.4,
+  "scenario_matrix": [
+    {
+      "move_pct": -10.0,
+      "target": 25.17,
+      "flow_musd": 3.9
+    },
+    {
+      "move_pct": -5.0,
+      "target": 26.57,
+      "flow_musd": 27.9
+    },
+    {
+      "move_pct": -2.0,
+      "target": 27.41,
+      "flow_musd": 34.0
+    },
+    {
+      "move_pct": 0.0,
+      "target": 27.97,
+      "flow_musd": -0.0
+    },
+    {
+      "move_pct": 2.0,
+      "target": 28.53,
+      "flow_musd": -56.2
+    },
+    {
+      "move_pct": 5.0,
+      "target": 29.37,
+      "flow_musd": -112.8
+    },
+    {
+      "move_pct": 10.0,
+      "target": 30.77,
+      "flow_musd": -187.9
+    }
+  ],
+  "iv30": 7.3,
+  "rv30": null,
+  "funding": null,
+  "coinbase_premium": null,
+  "oi_by_exchange": null,
+  "block_trades": null,
+  "oi_change_24h": null,
+  "stablecoin_supply": null
+}

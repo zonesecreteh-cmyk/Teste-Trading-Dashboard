@@ -1,0 +1,6 @@
+
+  Flow Engine - dashboard
+  Sur ce PC          : http://localhost:8000
+  Sur le reseau local: http://192.168.1.147:8000   (tel, autre PC du meme wifi)
+  (Chrome s'ouvre tout seul. Laisse cette fenetre OUVERTE.)
+

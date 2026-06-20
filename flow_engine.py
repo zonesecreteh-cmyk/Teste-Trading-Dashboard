@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-06-18-t"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-06-20-a"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer (SpotGamma : long calls / short puts) -------
 SIGN_CALL, SIGN_PUT = +1.0, -1.0
@@ -43,12 +43,18 @@ MIN_DTE = MIN_DTE_DAYS / 365.25
 # imminentes + la mensuelle la plus proche tiennent dans ~30 jours. Baisse à 14 pour
 # coller encore plus court ; monte si tu veux réintégrer le book lointain.
 # (La structure des échéances et le risk reversal gardent TOUT le book, eux.)
-MAX_DTE_DAYS = 14.0
-MAX_DTE = MAX_DTE_DAYS / 365.25
-# Bande de strikes pour le POSITIONNEMENT court terme. Au-delà de ±25% du spot, les
-# options profondément ITM (delta ≈ ±1) gonflent artificiellement le DEX sans rien dire
-# du court terme. On les écarte du calcul GEX/DEX/charm/vanna/matrice (pas du term/RR).
-POS_STRIKE_MIN, POS_STRIKE_MAX = 0.75, 1.25
+# ============================================================================
+# SCOPE DU POSITIONNEMENT — réglable ici, par TYPE d'actif.
+# C'est ce qui détermine l'AMPLEUR des GEX/DEX (combien d'échéances/strikes on somme).
+# Plus c'est large, plus les chiffres sont gros. Tune ces 6 valeurs pour caler
+# l'échelle sur ce que tu veux (ex. coller à une référence externe).
+#   DTE_DAYS     = nb de jours d'échéances inclus (court terme = petit)
+#   POS_BAND     = bande de strikes pour le DEX (±x% autour du spot)
+#   DISPLAY_BAND = zoom du graphe GEX (±x% autour du spot)
+# (La structure des échéances et le risk reversal gardent TOUT le book, eux.)
+# ----------------------------------------------------------------------------
+CRYPTO_DTE_DAYS, CRYPTO_POS_BAND, CRYPTO_DISPLAY_BAND = 10.0, 0.25, 0.20
+INDEX_DTE_DAYS,  INDEX_POS_BAND,  INDEX_DISPLAY_BAND  = 14.0, 0.13, 0.06
 # On ignore les strikes trop loin du spot (instruments parasites / illiquides).
 STRIKE_MIN_RATIO, STRIKE_MAX_RATIO = 0.5, 1.5
 
@@ -352,23 +358,6 @@ def _nearest_expiry(book, target_days):
     now = dt.datetime.now(dt.timezone.utc)
     return min({o["expiry"] for o in book}, key=lambda e: abs((e - now).days - target_days))
 
-def _iv_at_delta(legs, target_delta):
-    """IV interpolée linéairement au delta cible, au lieu de prendre le strike le plus
-    proche. Sur les échéances courtes (hebdo), les strikes sont clairsemés : le plus
-    proche peut être à delta 0.18 ou 0.35 et fausser le skew. L'interpolation corrige ça."""
-    pts = sorted(((o["delta"], o["iv"]) for o in legs), key=lambda x: x[0])
-    if not pts:
-        return None
-    # encadrement du delta cible
-    for i in range(len(pts) - 1):
-        d0, iv0 = pts[i]
-        d1, iv1 = pts[i + 1]
-        if (d0 - target_delta) * (d1 - target_delta) <= 0 and d1 != d0:
-            w = (target_delta - d0) / (d1 - d0)
-            return iv0 + w * (iv1 - iv0)
-    # pas d'encadrement -> strike le plus proche (repli)
-    return min(pts, key=lambda p: abs(p[0] - target_delta))[1]
-
 def risk_reversal(book, target_days):
     exp = _nearest_expiry(book, target_days)
     leg = [o for o in book if o["expiry"] == exp]
@@ -376,11 +365,9 @@ def risk_reversal(book, target_days):
     puts = [o for o in leg if o["type"] == "P"]
     if not calls or not puts:
         return None
-    iv_c = _iv_at_delta(calls, 0.25)
-    iv_p = _iv_at_delta(puts, -0.25)
-    if iv_c is None or iv_p is None:
-        return None
-    return round((iv_c - iv_p) * 100, 2)
+    c25 = min(calls, key=lambda o: abs(o["delta"] - 0.25))
+    p25 = min(puts, key=lambda o: abs(o["delta"] + 0.25))
+    return round((c25["iv"] - p25["iv"]) * 100, 2)
 
 def term_structure(book, S):
     now = dt.datetime.now(dt.timezone.utc)
@@ -392,6 +379,77 @@ def term_structure(book, S):
         atm = min(opts, key=lambda o: abs(o["strike"] - S))
         curve.append({"days": (exp - now).days, "atm_iv": round(atm["iv"] * 100, 1)})
     return [c for c in curve if c["days"] >= 0]
+
+def put_call_ratio(book):
+    """Ratio Put/Call sur l'open interest. >1 = plus de puts (couverture/peur),
+    <1 = plus de calls (appétit haussier). Jauge de sentiment classique."""
+    call_oi = sum(o["oi"] for o in book if o["type"] == "C")
+    put_oi = sum(o["oi"] for o in book if o["type"] == "P")
+    if call_oi <= 0:
+        return None
+    return {"pcr_oi": round(put_oi / call_oi, 2),
+            "call_oi": round(call_oi, 0), "put_oi": round(put_oi, 0)}
+
+def vol_smile(book, S, band=0.15):
+    """Smile de volatilité de l'échéance la plus proche : IV par strike (convention
+    OTM — puts sous le spot, calls au-dessus). Montre toute la structure de peur/euphorie,
+    là où le risk reversal ne donne que 2 points."""
+    fronts = [o for o in book if o["T"] > 0]
+    if not fronts:
+        return None
+    exp0 = min(o["expiry"] for o in fronts)
+    lo, hi = S * (1 - band), S * (1 + band)
+    by_strike = {}
+    for o in fronts:
+        if o["expiry"] != exp0 or not (lo <= o["strike"] <= hi):
+            continue
+        otm = (o["type"] == "P" and o["strike"] <= S) or (o["type"] == "C" and o["strike"] >= S)
+        # privilégie l'option OTM à ce strike ; sinon prend ce qu'on a
+        if o["strike"] not in by_strike or otm:
+            by_strike[o["strike"]] = round(o["iv"] * 100, 1)
+    pts = [{"strike": k, "iv": v} for k, v in sorted(by_strike.items())]
+    return pts if len(pts) >= 3 else None
+
+def expected_move(curve, S):
+    """Amplitude attendue jusqu'à la prochaine échéance, à partir de l'IV ATM front.
+    EM% = IV_atm × √(T). C'est LA donnée que les pros regardent pour cadrer un trade :
+    'le marché price ±X% d'ici l'échéance'."""
+    fronts = [c for c in curve if c["days"] >= 1]
+    if not fronts:
+        return None
+    f = fronts[0]
+    iv = f["atm_iv"] / 100.0
+    T = f["days"] / 365.25
+    pct = iv * (T ** 0.5) * 100
+    return {"days": f["days"], "pct": round(pct, 2),
+            "usd": round(S * pct / 100, 0),
+            "low": round(S * (1 - pct / 100), 0),
+            "high": round(S * (1 + pct / 100), 0)}
+
+def gamma_walls(gex_strikes):
+    """Strikes à plus fort GEX = murs (aimants de support/résistance).
+    Mur call = plus gros GEX positif ; mur put = plus gros GEX négatif (abs)."""
+    if not gex_strikes:
+        return {"call_wall": None, "put_wall": None}
+    items = list(gex_strikes.items())
+    pos = [(k, v) for k, v in items if v > 0]
+    neg = [(k, v) for k, v in items if v < 0]
+    call_wall = max(pos, key=lambda kv: kv[1])[0] if pos else None
+    put_wall = min(neg, key=lambda kv: kv[1])[0] if neg else None
+    return {"call_wall": call_wall, "put_wall": put_wall}
+
+def deribit_funding(currency):
+    """Funding 8h du perpétuel (crypto seulement). Renvoie None si indisponible :
+    le dashboard affichera alors 'DONNÉE MANQUANTE' au lieu de planter."""
+    try:
+        t = _deribit_get("public/ticker", instrument_name=f"{currency}-PERPETUAL")
+        f8 = t.get("funding_8h")
+        if f8 is None:
+            return None
+        return {"rate_8h_pct": round(f8 * 100, 4),
+                "annualized_pct": round(f8 * 3 * 365 * 100, 1)}   # 3 fenêtres de 8h/jour
+    except Exception:
+        return None
 
 def detect_term_regime(curve):
     pts = curve[:6]
@@ -426,25 +484,31 @@ def iv_percentile(asset, atm_iv_30d):
     return round(100 * sum(v <= atm_iv_30d for v in vals) / len(vals)), len(vals)
 
 
-def dex_gex_history(asset, dex_musd, gex_musd, score=None):
-    """Stocke (date, DEX, GEX, score) une fois par jour et renvoie l'historique pour le graphe temporel."""
+def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=None):
+    """Stocke (date, DEX, GEX, score, spot, max_pain) une fois par jour et renvoie l'historique.
+    spot + max_pain servent de fondation pour la vol réalisée (VRP), la migration du max pain
+    et le backtest des signaux. Rétro-compatible avec les anciens fichiers 3/4 colonnes."""
     os.makedirs(HIST_DIR, exist_ok=True)
     path = os.path.join(HIST_DIR, f"{asset}_dexgex.csv")
     today = dt.date.today().isoformat()
 
+    def _f(x):
+        return float(x) if x not in ("", "None", None) else None
+
     def _parse(line):
         p = line.strip().split(",")
-        if len(p) >= 4:
-            d, dx, gx, sc = p[0], p[1], p[2], p[3]
-        elif len(p) == 3:
-            d, dx, gx, sc = p[0], p[1], p[2], ""      # ancien format sans score
-        else:
+        if len(p) < 3:
             return None
-        return {"date": d, "dex": float(dx), "gex": float(gx),
-                "score": (float(sc) if sc not in ("", "None") else None)}
+        d = p[0]
+        dx = _f(p[1]); gx = _f(p[2])
+        sc = _f(p[3]) if len(p) >= 4 else None
+        sp = _f(p[4]) if len(p) >= 5 else None
+        mp = _f(p[5]) if len(p) >= 6 else None
+        return {"date": d, "dex": dx, "gex": gx, "score": sc, "spot": sp, "max_pain": mp}
 
     def _row(h):
-        return f"{h['date']},{h['dex']},{h['gex']},{'' if h['score'] is None else h['score']}\n"
+        def s(v): return "" if v is None else v
+        return f"{h['date']},{s(h['dex'])},{s(h['gex'])},{s(h['score'])},{s(h['spot'])},{s(h['max_pain'])}\n"
 
     hist = []
     if os.path.exists(path):
@@ -453,7 +517,8 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None):
             if row:
                 hist.append(row)
 
-    point = {"date": today, "dex": dex_musd, "gex": gex_musd, "score": score}
+    point = {"date": today, "dex": dex_musd, "gex": gex_musd, "score": score,
+             "spot": spot, "max_pain": max_pain}
     if not hist or hist[-1]["date"] != today:
         with open(path, "a") as f:
             f.write(_row(point))
@@ -589,7 +654,7 @@ def converge(metrics, catalyst_bias=None):
 # =============================================================================
 #  ASSEMBLAGE
 # =============================================================================
-def analyse(asset, catalyst_bias=None):
+def analyse(asset, catalyst_bias=None, dte_days=None):
     asset = asset.upper()
     if asset not in ASSETS:
         raise ValueError(f"Actif inconnu : {asset}. Dispo : {list(ASSETS)}")
@@ -599,20 +664,31 @@ def analyse(asset, catalyst_bias=None):
     if not book:
         raise RuntimeError("Aucune option exploitable récupérée.")
     csize = cfg["contract"]
-    # COURT TERME : le positionnement (GEX/DEX/charm/vanna/matrice/max pain/flip) ne
-    # regarde que les échéances proches (<= MAX_DTE_DAYS). La structure des échéances
-    # et le risk reversal, eux, ont besoin du book complet et le gardent.
-    book_near = [o for o in book
-                 if o["T"] <= MAX_DTE
-                 and POS_STRIKE_MIN <= o["strike"] / S <= POS_STRIKE_MAX] or book
+    # COURT TERME : on ne garde que les échéances proches (<= MAX_DTE_DAYS).
+    #  - book_dte  : échéances proches, TOUS les strikes -> GEX/charm/vanna/matrice/flip/max pain.
+    #    Le gamma est naturellement concentré près du spot, pas besoin de couper les strikes
+    #    (couper enlevait des strikes à GEX positif et rendait le GEX trop négatif).
+    #  - book_pos  : en plus, strikes ±25% -> SEULEMENT le DEX, que les options profondément
+    #    ITM (delta ≈ ±1) gonflaient artificiellement.
+    # La structure des échéances et le risk reversal gardent le book complet.
+    crypto = (cfg["source"] == "deribit")
+    default_dte = CRYPTO_DTE_DAYS if crypto else INDEX_DTE_DAYS
+    eff_dte = float(dte_days) if dte_days else default_dte
+    max_dte = eff_dte / 365.25
+    pos_band = CRYPTO_POS_BAND if crypto else INDEX_POS_BAND
+    display_band = CRYPTO_DISPLAY_BAND if crypto else INDEX_DISPLAY_BAND
+    pos_lo, pos_hi = 1 - pos_band, 1 + pos_band
+    book_dte = [o for o in book if o["T"] <= max_dte] or book
+    book_pos = [o for o in book_dte
+                if pos_lo <= o["strike"] / S <= pos_hi] or book_dte
 
-    gex_total, gex_strikes = gamma_exposure(book_near, S, csize)
-    dex_total = delta_exposure(book_near, S, csize)
-    flip = gamma_flip(book_near, S, csize)
+    gex_total, gex_strikes = gamma_exposure(book_dte, S, csize)
+    dex_total = delta_exposure(book_pos, S, csize)
+    flip = gamma_flip(book_dte, S, csize)
     curve = term_structure(book, S)
     atm30 = min(curve, key=lambda c: abs(c["days"] - 30))["atm_iv"] if curve else None
     ivp, n = iv_percentile(asset, atm30) if atm30 else (None, 0)
-    mp = max_pain(book_near)
+    mp = max_pain(book_dte)
 
     metrics = {
         "asset": asset, "label": cfg["label"], "spot": round(S, 2),
@@ -624,30 +700,38 @@ def analyse(asset, catalyst_bias=None):
         "dex_flux": "haussier" if dex_total > 0 else "baissier",
         "max_pain": mp, "max_pain_vs_spot_pct": round(100 * (mp - S) / S, 2),
         "gamma_flip": flip,
+        "flip_vs_spot_pct": (round(100 * (flip - S) / S, 2) if flip else None),
+        "expected_move": expected_move(curve, S),
+        "gamma_walls": gamma_walls(gex_strikes),
+        "put_call": put_call_ratio(book_dte),
+        "vol_smile": vol_smile(book_dte, S),
         "rr_weekly": risk_reversal(book, 7), "rr_monthly": risk_reversal(book, 30),
         "term_regime": detect_term_regime(curve),
         "iv_percentile": ivp, "iv_history_points": n,
         "term_curve": curve[:9],
         "gex_by_strike": [{"strike": k, "gex_musd": round(v / 1e6, 2)}
                           for k, v in gex_strikes.items()],
-        "n_options": len(book_near), "n_options_total": len(book),
+        "n_options": len(book_dte), "n_options_total": len(book),
+        "display_band": display_band,
+        "dte_days": eff_dte, "dte_default": default_dte,
     }
     metrics["convergence"] = converge(metrics, catalyst_bias)
     metrics["history"] = dex_gex_history(asset, metrics["dex_total_musd"],
                                          metrics["gex_total_musd"],
-                                         metrics["convergence"]["score"])
+                                         metrics["convergence"]["score"],
+                                         spot=S, max_pain=metrics.get("max_pain"))
 
     # --- Forecast dealer (charm/vanna) + matrice de scénarios : calculés sur le book ---
-    charm_d, vanna_1 = charm_vanna_flow(book_near, S, csize)
+    charm_d, vanna_1 = charm_vanna_flow(book_dte, S, csize)
     metrics["charm_musd"] = round(charm_d / 1e6, 1)
     metrics["vanna_musd"] = round(vanna_1 / 1e6, 1)
-    metrics["scenario_matrix"] = scenario_matrix(book_near, S, csize)
+    metrics["scenario_matrix"] = scenario_matrix(book_dte, S, csize)
     metrics["iv30"] = atm30
 
     # --- Champs nécessitant une source externe non branchée : explicitement None ---
     # Le dashboard affiche "DONNÉE MANQUANTE" pour chacun.
     metrics["rv30"] = None                # vol réalisée 30j -> besoin historique de prix
-    metrics["funding"] = None             # funding perp -> Deribit (à brancher)
+    metrics["funding"] = (deribit_funding(asset) if cfg["source"] == "deribit" else None)
     metrics["coinbase_premium"] = None    # Coinbase premium -> autre source
     metrics["oi_by_exchange"] = None      # OI Binance/Bybit/OKX -> autre source
     metrics["block_trades"] = None        # block trades >1M$ -> flux de trades Deribit

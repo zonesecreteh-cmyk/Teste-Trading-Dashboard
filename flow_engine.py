@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-06-20-a"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-06-23-b"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer (SpotGamma : long calls / short puts) -------
 SIGN_CALL, SIGN_PUT = +1.0, -1.0
@@ -143,6 +143,7 @@ def ingest_deribit(currency):
         book.append({
             "type": "C" if is_call else "P", "strike": strike, "expiry": expiry,
             "oi": float(oi), "iv": iv, "T": T,
+            "volume": float(x.get("volume") or 0.0),             # volume 24h (flux du jour)
             "gamma": bs_gamma(S, strike, T, iv),                 # calculés (Deribit ne les donne pas ici)
             "delta": bs_delta(S, strike, T, iv, is_call),
         })
@@ -229,6 +230,7 @@ def ingest_cboe(symbol_cfg):
         delta = bs_delta(S, strike, T, iv, is_call) if delta is None else float(delta)
         book.append({"type": "C" if is_call else "P", "strike": strike,
                      "expiry": expiry, "oi": float(oi), "iv": iv, "T": T,
+                     "volume": float(o.get("volume") or 0.0),
                      "gamma": gamma, "delta": delta})
     return S, book
 
@@ -380,15 +382,86 @@ def term_structure(book, S):
         curve.append({"days": (exp - now).days, "atm_iv": round(atm["iv"] * 100, 1)})
     return [c for c in curve if c["days"] >= 0]
 
+def data_quality(book, source):
+    """Indicateur de confiance : plus il y a de strikes/échéances et plus la source est
+    fraîche, plus le GEX/DEX est fiable. Donne un score 0-100 + un libellé, pour ne pas
+    prendre un chiffre brut pour argent comptant."""
+    strikes = len({o["strike"] for o in book})
+    expiries = len({o["expiry"] for o in book})
+    delayed = (source != "deribit")          # CBOE = différé ~15 min
+    # score : strikes (60 pts max), échéances (20 pts), fraîcheur (20 pts)
+    s_strikes = min(60, strikes * 2)          # 30 strikes -> plein pot
+    s_exp = min(20, expiries * 4)             # 5 échéances -> plein pot
+    s_fresh = 8 if delayed else 20
+    score = int(s_strikes + s_exp + s_fresh)
+    label = "ÉLEVÉE" if score >= 75 else "MOYENNE" if score >= 50 else "FAIBLE"
+    return {"score": score, "label": label, "strikes": strikes,
+            "expiries": expiries, "delayed": delayed,
+            "source": "Deribit (temps réel)" if not delayed else "CBOE (différé ~15 min)"}
+
+def realized_vol(spots, window=10):
+    """Vol réalisée annualisée à partir de la série de prix spot quotidiens (déjà stockés).
+    Renvoie {ready, have, need, rv} : tant qu'il n'y a pas assez de jours, ready=False et
+    la carte VRP affiche la progression. Dès qu'il y en a assez, ça s'active tout seul."""
+    import math
+    clean = [s for s in spots if s]
+    need = window + 1
+    if len(clean) < need:
+        return {"ready": False, "have": len(clean), "need": need, "rv": None}
+    seg = clean[-need:]
+    rets = [math.log(seg[i] / seg[i - 1]) for i in range(1, len(seg))]
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+    rv = (var ** 0.5) * (365 ** 0.5) * 100        # annualisée (données quotidiennes)
+    return {"ready": True, "have": len(clean), "need": need, "rv": round(rv, 1)}
+
 def put_call_ratio(book):
-    """Ratio Put/Call sur l'open interest. >1 = plus de puts (couverture/peur),
-    <1 = plus de calls (appétit haussier). Jauge de sentiment classique."""
+    """Ratio Put/Call sur l'open interest (positions ouvertes) ET sur le volume (flux du jour).
+    OI = stock de positions ; volume = ce qui s'est traité aujourd'hui (sentiment plus frais)."""
     call_oi = sum(o["oi"] for o in book if o["type"] == "C")
     put_oi = sum(o["oi"] for o in book if o["type"] == "P")
+    call_v = sum(o.get("volume", 0) for o in book if o["type"] == "C")
+    put_v = sum(o.get("volume", 0) for o in book if o["type"] == "P")
     if call_oi <= 0:
         return None
-    return {"pcr_oi": round(put_oi / call_oi, 2),
-            "call_oi": round(call_oi, 0), "put_oi": round(put_oi, 0)}
+    out = {"pcr_oi": round(put_oi / call_oi, 2),
+           "call_oi": round(call_oi, 0), "put_oi": round(put_oi, 0)}
+    out["pcr_vol"] = round(float(put_v) / float(call_v), 2) if call_v > 0 else None
+    return out
+
+def gex_by_expiry(book, S, csize):
+    """Répartit le GEX par horizon d'échéance : court (≤2j), hebdo (≤9j), mensuel (≤35j),
+    long (>35j). Montre d'où vient le gamma — le 0DTE/court pèse sur l'intraday, le mensuel
+    sur la tendance de fond."""
+    buckets = [("court", 2), ("hebdo", 9), ("mensuel", 35), ("long", 10 ** 9)]
+    now = dt.datetime.now(dt.timezone.utc)
+    agg = {k: 0.0 for k, _ in buckets}
+    for o in book:
+        sign = SIGN_CALL if o["type"] == "C" else SIGN_PUT
+        gex = sign * o["gamma"] * o["oi"] * csize * (S ** 2) * 0.01
+        days = (o["expiry"] - now).total_seconds() / 86400
+        for name, lim in buckets:
+            if days <= lim:
+                agg[name] += gex
+                break
+    out = [{"bucket": k, "gex_musd": round(float(agg[k]) / 1e6, 1)} for k, _ in buckets if abs(agg[k]) > 1e3]
+    return out or None
+
+def gamma_profile(book, S, csize, span=0.18, steps=37):
+    """Profil de gamma cumulé : le GEX total des dealers SI le spot était à chaque niveau de prix.
+    La courbe traverse zéro au gamma flip — au-dessus le marché est 'amorti' (gamma+),
+    en-dessous il est 'amplifié' (gamma−). Montre toute la structure, pas juste un point."""
+    lo, hi = S * (1 - span), S * (1 + span)
+    pts = []
+    for i in range(steps):
+        p = lo + (hi - lo) * i / (steps - 1)
+        tot = 0.0
+        for o in book:
+            sign = SIGN_CALL if o["type"] == "C" else SIGN_PUT
+            g = bs_gamma(p, o["strike"], o["T"], o["iv"])
+            tot += sign * g * o["oi"] * csize * (p ** 2) * 0.01
+        pts.append({"price": round(float(p), 2), "gex_musd": round(float(tot) / 1e6, 2)})
+    return pts
 
 def vol_smile(book, S, band=0.15):
     """Smile de volatilité de l'échéance la plus proche : IV par strike (convention
@@ -484,10 +557,10 @@ def iv_percentile(asset, atm_iv_30d):
     return round(100 * sum(v <= atm_iv_30d for v in vals) / len(vals)), len(vals)
 
 
-def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=None):
-    """Stocke (date, DEX, GEX, score, spot, max_pain) une fois par jour et renvoie l'historique.
-    spot + max_pain servent de fondation pour la vol réalisée (VRP), la migration du max pain
-    et le backtest des signaux. Rétro-compatible avec les anciens fichiers 3/4 colonnes."""
+def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=None, rr=None):
+    """Stocke (date, DEX, GEX, score, spot, max_pain, rr) une fois par jour et renvoie l'historique.
+    spot + max_pain + rr servent de fondation pour la vol réalisée (VRP), la migration du max pain,
+    l'historique du skew et le backtest. Rétro-compatible avec les anciens fichiers 3 à 6 colonnes."""
     os.makedirs(HIST_DIR, exist_ok=True)
     path = os.path.join(HIST_DIR, f"{asset}_dexgex.csv")
     today = dt.date.today().isoformat()
@@ -499,16 +572,15 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
         p = line.strip().split(",")
         if len(p) < 3:
             return None
-        d = p[0]
-        dx = _f(p[1]); gx = _f(p[2])
-        sc = _f(p[3]) if len(p) >= 4 else None
-        sp = _f(p[4]) if len(p) >= 5 else None
-        mp = _f(p[5]) if len(p) >= 6 else None
-        return {"date": d, "dex": dx, "gex": gx, "score": sc, "spot": sp, "max_pain": mp}
+        return {"date": p[0], "dex": _f(p[1]), "gex": _f(p[2]),
+                "score": _f(p[3]) if len(p) >= 4 else None,
+                "spot": _f(p[4]) if len(p) >= 5 else None,
+                "max_pain": _f(p[5]) if len(p) >= 6 else None,
+                "rr": _f(p[6]) if len(p) >= 7 else None}
 
     def _row(h):
         def s(v): return "" if v is None else v
-        return f"{h['date']},{s(h['dex'])},{s(h['gex'])},{s(h['score'])},{s(h['spot'])},{s(h['max_pain'])}\n"
+        return f"{h['date']},{s(h['dex'])},{s(h['gex'])},{s(h['score'])},{s(h['spot'])},{s(h['max_pain'])},{s(h.get('rr'))}\n"
 
     hist = []
     if os.path.exists(path):
@@ -518,17 +590,17 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
                 hist.append(row)
 
     point = {"date": today, "dex": dex_musd, "gex": gex_musd, "score": score,
-             "spot": spot, "max_pain": max_pain}
+             "spot": spot, "max_pain": max_pain, "rr": rr}
     if not hist or hist[-1]["date"] != today:
         with open(path, "a") as f:
             f.write(_row(point))
         hist.append(point)
-    else:                                          # met à jour la valeur du jour
+    else:
         hist[-1] = point
         with open(path, "w") as f:
             for h in hist:
                 f.write(_row(h))
-    return hist[-90:]                              # 90 derniers jours max
+    return hist[-90:]
 
 
 # =============================================================================
@@ -705,7 +777,11 @@ def analyse(asset, catalyst_bias=None, dte_days=None):
         "gamma_walls": gamma_walls(gex_strikes),
         "put_call": put_call_ratio(book_dte),
         "vol_smile": vol_smile(book_dte, S),
-        "rr_weekly": risk_reversal(book, 7), "rr_monthly": risk_reversal(book, 30),
+        "gex_by_expiry": gex_by_expiry(book_dte, S, csize),
+        "gamma_profile": gamma_profile(book_dte, S, csize),
+        "rr_weekly": risk_reversal(book, max(1, round(eff_dte))),
+        "rr_monthly": risk_reversal(book, 30),
+        "rr_near_days": max(1, round(eff_dte)),
         "term_regime": detect_term_regime(curve),
         "iv_percentile": ivp, "iv_history_points": n,
         "term_curve": curve[:9],
@@ -719,7 +795,8 @@ def analyse(asset, catalyst_bias=None, dte_days=None):
     metrics["history"] = dex_gex_history(asset, metrics["dex_total_musd"],
                                          metrics["gex_total_musd"],
                                          metrics["convergence"]["score"],
-                                         spot=S, max_pain=metrics.get("max_pain"))
+                                         spot=S, max_pain=metrics.get("max_pain"),
+                                         rr=metrics.get("rr_weekly"))
 
     # --- Forecast dealer (charm/vanna) + matrice de scénarios : calculés sur le book ---
     charm_d, vanna_1 = charm_vanna_flow(book_dte, S, csize)
@@ -728,9 +805,22 @@ def analyse(asset, catalyst_bias=None, dte_days=None):
     metrics["scenario_matrix"] = scenario_matrix(book_dte, S, csize)
     metrics["iv30"] = atm30
 
+    # --- Indicateur de confiance (qualité des données) ---
+    metrics["data_quality"] = data_quality(book_dte, cfg["source"])
+
+    # --- VRP : vol réalisée calculée sur l'historique des spots déjà stockés ---
+    #     S'active automatiquement dès qu'il y a assez de jours (sinon affiche la progression).
+    spots_hist = [h.get("spot") for h in metrics["history"]]
+    rv = realized_vol(spots_hist, window=10)
+    metrics["rv_status"] = rv                       # {ready, have, need, rv}
+    metrics["rv30"] = rv["rv"] if rv["ready"] else None
+    if rv["ready"] and atm30 is not None:
+        metrics["vrp"] = round(atm30 - rv["rv"], 1)  # IV - RV : >0 options chères, <0 bradées
+    else:
+        metrics["vrp"] = None
+
     # --- Champs nécessitant une source externe non branchée : explicitement None ---
     # Le dashboard affiche "DONNÉE MANQUANTE" pour chacun.
-    metrics["rv30"] = None                # vol réalisée 30j -> besoin historique de prix
     metrics["funding"] = (deribit_funding(asset) if cfg["source"] == "deribit" else None)
     metrics["coinbase_premium"] = None    # Coinbase premium -> autre source
     metrics["oi_by_exchange"] = None      # OI Binance/Bybit/OKX -> autre source

@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-06-23-b"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-06-24-a"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer (SpotGamma : long calls / short puts) -------
 SIGN_CALL, SIGN_PUT = +1.0, -1.0
@@ -371,6 +371,24 @@ def risk_reversal(book, target_days):
     p25 = min(puts, key=lambda o: abs(o["delta"] + 0.25))
     return round((c25["iv"] - p25["iv"]) * 100, 2)
 
+def skew_term_at(book, dte):
+    return risk_reversal(book, max(1, round(dte)))
+
+def charm_vanna_opex(book, S, csize):
+    """Flux charm/vanna concentré sur la PROCHAINE GROSSE ÉCHÉANCE (OPEX mensuelle) — c'est là
+    que les dealers ont le plus de delta à re-hedger mécaniquement. charm = delta à ajuster sur
+    24h (passage du temps) ; vanna = delta à ajuster si l'IV bouge de +1 point. Moteur des
+    'vanna rallies' et du pin d'OPEX."""
+    dtes = horizon_dtes(book)
+    exp = _nearest_expiry(book, dtes["mensuel"])
+    leg = [o for o in book if o["expiry"] == exp]
+    if not leg:
+        return None
+    ch, vn = charm_vanna_flow(leg, S, csize)
+    now = dt.datetime.now(dt.timezone.utc)
+    days = (exp - now).days if exp else None
+    return {"charm_musd": round(ch / 1e6, 2), "vanna_musd": round(vn / 1e6, 2), "days": days}
+
 def term_structure(book, S):
     now = dt.datetime.now(dt.timezone.utc)
     by_exp = {}
@@ -399,10 +417,10 @@ def data_quality(book, source):
             "expiries": expiries, "delayed": delayed,
             "source": "Deribit (temps réel)" if not delayed else "CBOE (différé ~15 min)"}
 
-def realized_vol(spots, window=10):
+def realized_vol(spots, window=10, ann=365):
     """Vol réalisée annualisée à partir de la série de prix spot quotidiens (déjà stockés).
-    Renvoie {ready, have, need, rv} : tant qu'il n'y a pas assez de jours, ready=False et
-    la carte VRP affiche la progression. Dès qu'il y en a assez, ça s'active tout seul."""
+    ann = jours de cotation par an : 365 pour le crypto (24/7), ~252 pour les indices (bourse).
+    Renvoie {ready, have, need, rv} : tant qu'il n'y a pas assez de jours, ready=False."""
     import math
     clean = [s for s in spots if s]
     need = window + 1
@@ -412,7 +430,7 @@ def realized_vol(spots, window=10):
     rets = [math.log(seg[i] / seg[i - 1]) for i in range(1, len(seg))]
     mean = sum(rets) / len(rets)
     var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
-    rv = (var ** 0.5) * (365 ** 0.5) * 100        # annualisée (données quotidiennes)
+    rv = (var ** 0.5) * (ann ** 0.5) * 100        # annualisée
     return {"ready": True, "have": len(clean), "need": need, "rv": round(rv, 1)}
 
 def put_call_ratio(book):
@@ -557,13 +575,15 @@ def iv_percentile(asset, atm_iv_30d):
     return round(100 * sum(v <= atm_iv_30d for v in vals) / len(vals)), len(vals)
 
 
-def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=None, rr=None):
-    """Stocke (date, DEX, GEX, score, spot, max_pain, rr) une fois par jour et renvoie l'historique.
-    spot + max_pain + rr servent de fondation pour la vol réalisée (VRP), la migration du max pain,
-    l'historique du skew et le backtest. Rétro-compatible avec les anciens fichiers 3 à 6 colonnes."""
+def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=None, rr=None,
+                    store=True, horizon="long", levels=None):
+    """Historique PAR HORIZON. store=False = lecture seule. Seul daily.py écrit.
+    levels = liste ordonnée [L1,L2,L3,L4,L5] de verdicts (BULL/BEAR/NEUTRAL) — stockés en
+    colonnes 8-12 pour le diff par composant. Compat : les vieux fichiers (7 col) sont lus tels quels."""
     os.makedirs(HIST_DIR, exist_ok=True)
-    path = os.path.join(HIST_DIR, f"{asset}_dexgex.csv")
+    path = os.path.join(HIST_DIR, f"{asset}_{horizon}_dexgex.csv")
     today = dt.date.today().isoformat()
+    LKEYS = ["L1_REGIME", "L2_POSITIONING", "L3_STRUCTURE", "L4_LIQUIDITE", "L5_CATALYST"]
 
     def _f(x):
         return float(x) if x not in ("", "None", None) else None
@@ -572,15 +592,23 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
         p = line.strip().split(",")
         if len(p) < 3:
             return None
+        lv = {}
+        if len(p) >= 12:
+            for i, k in enumerate(LKEYS):
+                lv[k] = p[7 + i] or None
         return {"date": p[0], "dex": _f(p[1]), "gex": _f(p[2]),
                 "score": _f(p[3]) if len(p) >= 4 else None,
                 "spot": _f(p[4]) if len(p) >= 5 else None,
                 "max_pain": _f(p[5]) if len(p) >= 6 else None,
-                "rr": _f(p[6]) if len(p) >= 7 else None}
+                "rr": _f(p[6]) if len(p) >= 7 else None,
+                "levels": lv}
 
     def _row(h):
         def s(v): return "" if v is None else v
-        return f"{h['date']},{s(h['dex'])},{s(h['gex'])},{s(h['score'])},{s(h['spot'])},{s(h['max_pain'])},{s(h.get('rr'))}\n"
+        lv = h.get("levels") or {}
+        lcols = ",".join(str(lv.get(k, "") or "") for k in LKEYS)
+        return (f"{h['date']},{s(h['dex'])},{s(h['gex'])},{s(h['score'])},"
+                f"{s(h['spot'])},{s(h['max_pain'])},{s(h.get('rr'))},{lcols}\n")
 
     hist = []
     if os.path.exists(path):
@@ -589,8 +617,15 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
             if row:
                 hist.append(row)
 
+    if not store:                                  # vue interactive : on lit seulement
+        return hist[-90:]
+
+    lv = {}
+    if levels:
+        for i, k in enumerate(LKEYS):
+            lv[k] = levels[i] if i < len(levels) else None
     point = {"date": today, "dex": dex_musd, "gex": gex_musd, "score": score,
-             "spot": spot, "max_pain": max_pain, "rr": rr}
+             "spot": spot, "max_pain": max_pain, "rr": rr, "levels": lv}
     if not hist or hist[-1]["date"] != today:
         with open(path, "a") as f:
             f.write(_row(point))
@@ -726,13 +761,82 @@ def converge(metrics, catalyst_bias=None):
 # =============================================================================
 #  ASSEMBLAGE
 # =============================================================================
-def analyse(asset, catalyst_bias=None, dte_days=None):
+# Horizons canoniques alignés sur les VRAIS tenors d'open interest (là où le gamma vit) :
+#   court ≤7j (weeklies), mensuel ≤30j, trimestriel ≤90j (l'OI dominant sur Deribit).
+# Cumulatif : chaque horizon inclut tout le gamma jusqu'à son échéance. daily.py écrit les 3.
+HORIZONS = [("court", 7.0), ("mensuel", 30.0), ("trimestriel", 90.0)]
+
+def horizon_dtes(book):
+    """PRO : snappe chaque horizon sur la VRAIE échéance dominante (par open interest) de l'actif,
+    au lieu d'un seuil en jours arbitraire. court = échéance la plus proche ; mensuel = la plus
+    chargée en OI dans ~14-45j (l'OPEX/fin de mois) ; trimestriel = la plus chargée au-delà de 45j
+    (le quarterly Deribit). Renvoie {court, mensuel, trimestriel} en jours, propres à l'actif."""
+    now = dt.datetime.now(dt.timezone.utc)
+    oi_by_exp = {}
+    for o in book:
+        d = (o["expiry"] - now).total_seconds() / 86400
+        if d <= 0:
+            continue
+        e = oi_by_exp.setdefault(o["expiry"], [0.0, d])
+        e[0] += o.get("oi", 0)
+    if not oi_by_exp:
+        return {"court": 7.0, "mensuel": 30.0, "trimestriel": 90.0}
+    exps = sorted(oi_by_exp.values(), key=lambda v: v[1])          # [oi, days] triés par jours
+    court = exps[0][1]                                             # échéance la plus proche
+    band_m = [e for e in exps if 14 <= e[1] <= 45]
+    mensuel = (max(band_m, key=lambda e: e[0])[1] if band_m
+               else next((e[1] for e in exps if e[1] > court + 10), exps[-1][1]))
+    band_q = [e for e in exps if e[1] > 45]
+    trimestriel = (max(band_q, key=lambda e: e[0])[1] if band_q else exps[-1][1])
+    return {"court": round(court, 1), "mensuel": round(mensuel, 1),
+            "trimestriel": round(trimestriel, 1)}
+
+def _horizon_for(dte):
+    return min(HORIZONS, key=lambda h: abs(h[1] - float(dte)))[0]
+
+def _read_history_file(asset, horizon):
+    path = os.path.join(HIST_DIR, f"{asset}_{horizon}_dexgex.csv")
+    out = []
+    if os.path.exists(path):
+        for line in open(path):
+            p = line.strip().split(",")
+            if len(p) < 3:
+                continue
+            def f(x): return float(x) if x not in ("", "None") else None
+            LK = ["L1_REGIME", "L2_POSITIONING", "L3_STRUCTURE", "L4_LIQUIDITE", "L5_CATALYST"]
+            lv = {}
+            if len(p) >= 12:
+                for i, k in enumerate(LK):
+                    lv[k] = p[7 + i] or None
+            out.append({"date": p[0], "dex": f(p[1]), "gex": f(p[2]),
+                        "score": f(p[3]) if len(p) >= 4 else None,
+                        "spot": f(p[4]) if len(p) >= 5 else None,
+                        "max_pain": f(p[5]) if len(p) >= 6 else None,
+                        "rr": f(p[6]) if len(p) >= 7 else None,
+                        "levels": lv})
+    return out[-90:]
+
+def all_histories(asset):
+    """Renvoie les 3 séries d'historique (une par horizon) pour basculer côté dashboard."""
+    return {h: _read_history_file(asset, h) for h, _ in HORIZONS}
+
+def fetch_chain(asset):
+    """Récupère la chaîne d'options UNE fois (S, book). Permet à daily.py de calculer
+    plusieurs horizons sans refetcher le réseau à chaque fois."""
+    asset = asset.upper()
+    cfg = ASSETS[asset]
+    return (ingest_deribit(asset) if cfg["source"] == "deribit" else ingest_cboe(cfg))
+
+def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefetched=None, horizon=None):
     asset = asset.upper()
     if asset not in ASSETS:
         raise ValueError(f"Actif inconnu : {asset}. Dispo : {list(ASSETS)}")
     cfg = ASSETS[asset]
-    S, book = (ingest_deribit(asset) if cfg["source"] == "deribit"
-               else ingest_cboe(cfg))
+    if prefetched is not None:
+        S, book = prefetched
+    else:
+        S, book = (ingest_deribit(asset) if cfg["source"] == "deribit"
+                   else ingest_cboe(cfg))
     if not book:
         raise RuntimeError("Aucune option exploitable récupérée.")
     csize = cfg["contract"]
@@ -761,27 +865,37 @@ def analyse(asset, catalyst_bias=None, dte_days=None):
     atm30 = min(curve, key=lambda c: abs(c["days"] - 30))["atm_iv"] if curve else None
     ivp, n = iv_percentile(asset, atm30) if atm30 else (None, 0)
     mp = max_pain(book_dte)
+    _hd = horizon_dtes(book)                       # vraies échéances dominantes
+    # Structure par terme du skew : RR sur court/mensuel/trimestriel, pour voir si la peur
+    # est front-loaded (court terme) ou structurelle (long terme).
+    skew_term = [{"label": lab, "days": round(_hd[lab]),
+                  "rr": risk_reversal(book, max(1, round(_hd[lab])))}
+                 for lab in ("court", "mensuel", "trimestriel")]
 
     metrics = {
         "asset": asset, "label": cfg["label"], "spot": round(S, 2),
         "version": VERSION,
         "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "gex_total_musd": round(gex_total / 1e6, 1),
+        "gex_per_pct_musd": round(gex_total / 1e6, 1),   # = hedging dealer par 1% de move
         "gex_regime": "ANCRAGE (range)" if gex_total > 0 else "AMPLIFICATION (cassure)",
         "dex_total_musd": round(dex_total / 1e6, 1),
         "dex_flux": "haussier" if dex_total > 0 else "baissier",
         "max_pain": mp, "max_pain_vs_spot_pct": round(100 * (mp - S) / S, 2),
-        "gamma_flip": flip,
+        "gamma_flip": flip, "vol_trigger": flip,
         "flip_vs_spot_pct": (round(100 * (flip - S) / S, 2) if flip else None),
         "expected_move": expected_move(curve, S),
         "gamma_walls": gamma_walls(gex_strikes),
         "put_call": put_call_ratio(book_dte),
-        "vol_smile": vol_smile(book_dte, S),
+        "vol_smile": vol_smile(book_dte, S, band=(0.15 if crypto else 0.08)),
         "gex_by_expiry": gex_by_expiry(book_dte, S, csize),
-        "gamma_profile": gamma_profile(book_dte, S, csize),
+        "gamma_profile": gamma_profile(book_dte, S, csize, span=(0.18 if crypto else 0.10)),
         "rr_weekly": risk_reversal(book, max(1, round(eff_dte))),
         "rr_monthly": risk_reversal(book, 30),
         "rr_near_days": max(1, round(eff_dte)),
+        "skew_term": skew_term,
+        "charm_vanna_opex": charm_vanna_opex(book, S, csize),
+        "vol_trigger_regime": ("range" if (flip and S >= flip) else "breakout" if flip else None),
         "term_regime": detect_term_regime(curve),
         "iv_percentile": ivp, "iv_history_points": n,
         "term_curve": curve[:9],
@@ -792,11 +906,22 @@ def analyse(asset, catalyst_bias=None, dte_days=None):
         "dte_days": eff_dte, "dte_default": default_dte,
     }
     metrics["convergence"] = converge(metrics, catalyst_bias)
-    metrics["history"] = dex_gex_history(asset, metrics["dex_total_musd"],
-                                         metrics["gex_total_musd"],
-                                         metrics["convergence"]["score"],
-                                         spot=S, max_pain=metrics.get("max_pain"),
-                                         rr=metrics.get("rr_weekly"))
+    # Historique PAR HORIZON. Le label vient de daily.py (snappé sur la vraie échéance) ;
+    # sinon on le déduit du DTE pour savoir quelle série montrer (vue interactive).
+    hz = horizon or _horizon_for(eff_dte)
+    metrics["horizon"] = hz
+    metrics["horizon_dtes"] = _hd        # vraies échéances dominantes (jours)
+    if store_history:
+        _lv = metrics["convergence"].get("levels", {})
+        _lvlist = [(_lv.get(k) or {}).get("verdict") for k in
+                   ["L1_REGIME", "L2_POSITIONING", "L3_STRUCTURE", "L4_LIQUIDITE", "L5_CATALYST"]]
+        dex_gex_history(asset, metrics["dex_total_musd"], metrics["gex_total_musd"],
+                        metrics["convergence"]["score"], spot=S,
+                        max_pain=metrics.get("max_pain"), rr=metrics.get("rr_weekly"),
+                        store=True, horizon=hz, levels=_lvlist)
+    # Renvoie les 3 séries (pour basculer dans le dashboard) + celle du profil actif par défaut.
+    metrics["histories"] = all_histories(asset)
+    metrics["history"] = metrics["histories"].get(horizon, [])
 
     # --- Forecast dealer (charm/vanna) + matrice de scénarios : calculés sur le book ---
     charm_d, vanna_1 = charm_vanna_flow(book_dte, S, csize)
@@ -811,7 +936,7 @@ def analyse(asset, catalyst_bias=None, dte_days=None):
     # --- VRP : vol réalisée calculée sur l'historique des spots déjà stockés ---
     #     S'active automatiquement dès qu'il y a assez de jours (sinon affiche la progression).
     spots_hist = [h.get("spot") for h in metrics["history"]]
-    rv = realized_vol(spots_hist, window=10)
+    rv = realized_vol(spots_hist, window=10, ann=(365 if crypto else 252))
     metrics["rv_status"] = rv                       # {ready, have, need, rv}
     metrics["rv30"] = rv["rv"] if rv["ready"] else None
     if rv["ready"] and atm30 is not None:

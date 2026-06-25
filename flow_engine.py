@@ -24,10 +24,42 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-06-24-a"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-06-25-a"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
-# ---- Convention de signe dealer (SpotGamma : long calls / short puts) -------
-SIGN_CALL, SIGN_PUT = +1.0, -1.0
+# ---- Convention de signe dealer ---------------------------------------------
+# IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
+# depuis l'OI et l'IV publics — on ne sait pas qui a vendu/acheté. C'est donc une
+# HEURISTIQUE, pas une vérité. Deux modes :
+#   "fixed"    : convention SqueezeMetrics/SpotGamma -> dealers LONGS calls / COURTS puts.
+#                Raisonnable sur indices (call-overwriting + achat de puts), discutable ailleurs.
+#   "adaptive" : déduit l'orientation du SKEW (risk reversal 25d). Le côté dont l'IV est la
+#                plus chère = côté le plus demandé par les clients = côté où le DEALER est COURT.
+#                  RR < -bande (skew put)  -> dealers courts puts  -> (+call, -put)  [= fixed]
+#                  RR > +bande (skew call) -> dealers courts calls -> (-call, +put)  [FLIP]
+#                  |RR| <= bande           -> bande morte : on GARDE la convention fixed.
+# La bande morte (hystérésis) évite que le GEX change de signe à chaque micro-variation du
+# skew autour de 0 — ce qui rendrait la SÉRIE D'HISTORIQUE incohérente (l'inverse du but).
+# Tant que le backtest (point 5) n'a pas tranché, on reste en "fixed" : l'orientation
+# adaptative est calculée et AFFICHÉE comme diagnostic, mais PAS appliquée à l'historique.
+DEALER_SIGN_MODE = "fixed"        # "fixed" | "adaptive" -- bascule quand le backtest aura parlé
+SKEW_FLIP_BAND   = 1.5            # |RR| (pts d'IV) au-delà duquel l'orientation peut basculer
+SIGN_CALL, SIGN_PUT = +1.0, -1.0  # défaut = mode fixed
+
+
+def dealer_signs(rr, mode=None):
+    """(sign_call, sign_put, info) selon le mode et le skew. rr = risk reversal 25d (pts d'IV).
+    Heuristique — voir la note ci-dessus. info = {mode, rr, flipped, reason} pour l'afficher."""
+    mode = (mode or DEALER_SIGN_MODE)
+    if mode != "adaptive" or rr is None:
+        return SIGN_CALL, SIGN_PUT, {"mode": "fixed", "rr": rr, "flipped": False,
+                                     "reason": "convention fixe : dealers longs calls / courts puts"}
+    if rr > SKEW_FLIP_BAND:                       # skew call -> dealers courts calls
+        return -1.0, +1.0, {"mode": "adaptive", "rr": rr, "flipped": True,
+                            "reason": f"skew call (RR {rr:+.1f}) : dealers courts calls -> (-call,+put)"}
+    flipped = False
+    reason = (f"skew put (RR {rr:+.1f}) : dealers courts puts -> (+call,-put)" if rr < -SKEW_FLIP_BAND
+              else f"skew neutre (RR {rr:+.1f}, |RR|<={SKEW_FLIP_BAND}) : convention standard maintenue")
+    return +1.0, -1.0, {"mode": "adaptive", "rr": rr, "flipped": flipped, "reason": reason}
 
 # ---- Garde-fous données ------------------------------------------------------
 # Plancher de maturité : sous ce seuil, le gamma Black-Scholes explose
@@ -238,16 +270,17 @@ def ingest_cboe(symbol_cfg):
 # =============================================================================
 #  MÉTRIQUES (contract_size paramétré : 1 crypto, 100 indices)
 # =============================================================================
-def gamma_exposure(book, S, csize):
+def gamma_exposure(book, S, csize, signs=None):
+    sc, sp = signs if signs else (SIGN_CALL, SIGN_PUT)
     by_strike, total = {}, 0.0
     for o in book:
-        sign = SIGN_CALL if o["type"] == "C" else SIGN_PUT
+        sign = sc if o["type"] == "C" else sp
         gex = sign * o["gamma"] * o["oi"] * csize * (S ** 2) * 0.01
         by_strike[o["strike"]] = by_strike.get(o["strike"], 0.0) + gex
         total += gex
     return total, dict(sorted(by_strike.items()))
 
-def gamma_flip(book, S, csize, span=0.20, steps=41):
+def gamma_flip(book, S, csize, span=0.20, steps=41, signs=None):
     """
     Niveau de prix où le GEX TOTAL bascule de positif à négatif (le 'gamma flip').
     On recalcule le gamma de chaque option à des prix hypothétiques autour du spot
@@ -257,11 +290,12 @@ def gamma_flip(book, S, csize, span=0.20, steps=41):
     """
     if not book:
         return None
+    sc, sp = signs if signs else (SIGN_CALL, SIGN_PUT)
     K  = np.array([o["strike"] for o in book], dtype=float)
     T  = np.array([o["T"]      for o in book], dtype=float)
     iv = np.array([o["iv"]     for o in book], dtype=float)
     oi = np.array([o["oi"]     for o in book], dtype=float)
-    sg = np.array([SIGN_CALL if o["type"] == "C" else SIGN_PUT for o in book], dtype=float)
+    sg = np.array([sc if o["type"] == "C" else sp for o in book], dtype=float)
     keep = (T > 0) & (iv > 0)
     K, T, iv, oi, sg = K[keep], T[keep], iv[keep], oi[keep], sg[keep]
     if K.size == 0:
@@ -300,17 +334,18 @@ def bs_vanna(S, K, T, sigma):
     return -norm.pdf(d1) * d2 / sigma
 
 
-def charm_vanna_flow(book, S, csize):
+def charm_vanna_flow(book, S, csize, signs=None):
     """
     Flux spot (M$) que les dealers doivent faire mécaniquement pour rester delta-neutres :
     - charm : à cause du passage du temps (sur 24h).
     - vanna : si l'IV bouge de +1 point.
     Modèle basé sur la convention de signe dealer (comme GEX/DEX), pas une vérité.
     """
+    sc, sp = signs if signs else (SIGN_CALL, SIGN_PUT)
     charm_daily = 0.0
     vanna_1pt = 0.0
     for o in book:
-        sign = SIGN_CALL if o["type"] == "C" else SIGN_PUT
+        sign = sc if o["type"] == "C" else sp
         ch = bs_charm(S, o["strike"], o["T"], o["iv"], o["type"] == "C")
         vn = bs_vanna(S, o["strike"], o["T"], o["iv"])
         charm_daily += sign * (ch / 365.0) * o["oi"] * csize * S
@@ -318,16 +353,17 @@ def charm_vanna_flow(book, S, csize):
     return charm_daily, vanna_1pt
 
 
-def scenario_matrix(book, S, csize, moves=(-0.10, -0.05, -0.02, 0.0, 0.02, 0.05, 0.10)):
+def scenario_matrix(book, S, csize, moves=(-0.10, -0.05, -0.02, 0.0, 0.02, 0.05, 0.10), signs=None):
     """
     Pour chaque mouvement du spot, combien les dealers doivent acheter/vendre en spot
     pour rester couverts (flux de hedge mécanique). Déduit du profil delta du book.
     flow > 0 = dealers ACHÈTENT ; flow < 0 = dealers VENDENT.
     """
+    sc, sp = signs if signs else (SIGN_CALL, SIGN_PUT)
     def net_delta(Sp):
         tot = 0.0
         for o in book:
-            sign = SIGN_CALL if o["type"] == "C" else SIGN_PUT
+            sign = sc if o["type"] == "C" else sp
             tot += sign * bs_delta(Sp, o["strike"], o["T"], o["iv"], o["type"] == "C") * o["oi"] * csize
         return tot
     d0 = net_delta(S)
@@ -374,7 +410,7 @@ def risk_reversal(book, target_days):
 def skew_term_at(book, dte):
     return risk_reversal(book, max(1, round(dte)))
 
-def charm_vanna_opex(book, S, csize):
+def charm_vanna_opex(book, S, csize, signs=None):
     """Flux charm/vanna concentré sur la PROCHAINE GROSSE ÉCHÉANCE (OPEX mensuelle) — c'est là
     que les dealers ont le plus de delta à re-hedger mécaniquement. charm = delta à ajuster sur
     24h (passage du temps) ; vanna = delta à ajuster si l'IV bouge de +1 point. Moteur des
@@ -384,7 +420,7 @@ def charm_vanna_opex(book, S, csize):
     leg = [o for o in book if o["expiry"] == exp]
     if not leg:
         return None
-    ch, vn = charm_vanna_flow(leg, S, csize)
+    ch, vn = charm_vanna_flow(leg, S, csize, signs)
     now = dt.datetime.now(dt.timezone.utc)
     days = (exp - now).days if exp else None
     return {"charm_musd": round(ch / 1e6, 2), "vanna_musd": round(vn / 1e6, 2), "days": days}
@@ -447,15 +483,16 @@ def put_call_ratio(book):
     out["pcr_vol"] = round(float(put_v) / float(call_v), 2) if call_v > 0 else None
     return out
 
-def gex_by_expiry(book, S, csize):
+def gex_by_expiry(book, S, csize, signs=None):
     """Répartit le GEX par horizon d'échéance : court (≤2j), hebdo (≤9j), mensuel (≤35j),
     long (>35j). Montre d'où vient le gamma — le 0DTE/court pèse sur l'intraday, le mensuel
     sur la tendance de fond."""
+    sc, sp = signs if signs else (SIGN_CALL, SIGN_PUT)
     buckets = [("court", 2), ("hebdo", 9), ("mensuel", 35), ("long", 10 ** 9)]
     now = dt.datetime.now(dt.timezone.utc)
     agg = {k: 0.0 for k, _ in buckets}
     for o in book:
-        sign = SIGN_CALL if o["type"] == "C" else SIGN_PUT
+        sign = sc if o["type"] == "C" else sp
         gex = sign * o["gamma"] * o["oi"] * csize * (S ** 2) * 0.01
         days = (o["expiry"] - now).total_seconds() / 86400
         for name, lim in buckets:
@@ -465,17 +502,18 @@ def gex_by_expiry(book, S, csize):
     out = [{"bucket": k, "gex_musd": round(float(agg[k]) / 1e6, 1)} for k, _ in buckets if abs(agg[k]) > 1e3]
     return out or None
 
-def gamma_profile(book, S, csize, span=0.18, steps=37):
+def gamma_profile(book, S, csize, span=0.18, steps=37, signs=None):
     """Profil de gamma cumulé : le GEX total des dealers SI le spot était à chaque niveau de prix.
     La courbe traverse zéro au gamma flip — au-dessus le marché est 'amorti' (gamma+),
     en-dessous il est 'amplifié' (gamma−). Montre toute la structure, pas juste un point."""
+    sc, sp = signs if signs else (SIGN_CALL, SIGN_PUT)
     lo, hi = S * (1 - span), S * (1 + span)
     pts = []
     for i in range(steps):
         p = lo + (hi - lo) * i / (steps - 1)
         tot = 0.0
         for o in book:
-            sign = SIGN_CALL if o["type"] == "C" else SIGN_PUT
+            sign = sc if o["type"] == "C" else sp
             g = bs_gamma(p, o["strike"], o["T"], o["iv"])
             tot += sign * g * o["oi"] * csize * (p ** 2) * 0.01
         pts.append({"price": round(float(p), 2), "gex_musd": round(float(tot) / 1e6, 2)})
@@ -576,10 +614,13 @@ def iv_percentile(asset, atm_iv_30d):
 
 
 def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=None, rr=None,
-                    store=True, horizon="long", levels=None):
+                    store=True, horizon="long", levels=None, gex_fixed=None, gex_adaptive=None):
     """Historique PAR HORIZON. store=False = lecture seule. Seul daily.py écrit.
-    levels = liste ordonnée [L1,L2,L3,L4,L5] de verdicts (BULL/BEAR/NEUTRAL) — stockés en
-    colonnes 8-12 pour le diff par composant. Compat : les vieux fichiers (7 col) sont lus tels quels."""
+    levels = liste ordonnée [L1,L2,L3,L4,L5] de verdicts (BULL/BEAR/NEUTRAL) — colonnes 8-12.
+    gex_fixed / gex_adaptive = le GEX calculé avec CHAQUE convention de signe, écrits TOUS LES
+    DEUX chaque jour (colonnes 13-14), quel que soit le mode actif. Le mode ne change que ce
+    qu'on REGARDE, jamais ce qu'on ENREGISTRE -> aucun trou si tu bascules un jour.
+    Compat ascendante : les vieux fichiers (7 ou 12 colonnes) restent lus tels quels."""
     os.makedirs(HIST_DIR, exist_ok=True)
     path = os.path.join(HIST_DIR, f"{asset}_{horizon}_dexgex.csv")
     today = dt.date.today().isoformat()
@@ -601,6 +642,8 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
                 "spot": _f(p[4]) if len(p) >= 5 else None,
                 "max_pain": _f(p[5]) if len(p) >= 6 else None,
                 "rr": _f(p[6]) if len(p) >= 7 else None,
+                "gex_fixed": _f(p[12]) if len(p) >= 13 else None,
+                "gex_adaptive": _f(p[13]) if len(p) >= 14 else None,
                 "levels": lv}
 
     def _row(h):
@@ -608,7 +651,8 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
         lv = h.get("levels") or {}
         lcols = ",".join(str(lv.get(k, "") or "") for k in LKEYS)
         return (f"{h['date']},{s(h['dex'])},{s(h['gex'])},{s(h['score'])},"
-                f"{s(h['spot'])},{s(h['max_pain'])},{s(h.get('rr'))},{lcols}\n")
+                f"{s(h['spot'])},{s(h['max_pain'])},{s(h.get('rr'))},{lcols},"
+                f"{s(h.get('gex_fixed'))},{s(h.get('gex_adaptive'))}\n")
 
     hist = []
     if os.path.exists(path):
@@ -625,7 +669,8 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
         for i, k in enumerate(LKEYS):
             lv[k] = levels[i] if i < len(levels) else None
     point = {"date": today, "dex": dex_musd, "gex": gex_musd, "score": score,
-             "spot": spot, "max_pain": max_pain, "rr": rr, "levels": lv}
+             "spot": spot, "max_pain": max_pain, "rr": rr, "levels": lv,
+             "gex_fixed": gex_fixed, "gex_adaptive": gex_adaptive}
     if not hist or hist[-1]["date"] != today:
         with open(path, "a") as f:
             f.write(_row(point))
@@ -813,6 +858,8 @@ def _read_history_file(asset, horizon):
                         "spot": f(p[4]) if len(p) >= 5 else None,
                         "max_pain": f(p[5]) if len(p) >= 6 else None,
                         "rr": f(p[6]) if len(p) >= 7 else None,
+                        "gex_fixed": f(p[12]) if len(p) >= 13 else None,
+                        "gex_adaptive": f(p[13]) if len(p) >= 14 else None,
                         "levels": lv})
     return out[-90:]
 
@@ -858,9 +905,15 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     book_pos = [o for o in book_dte
                 if pos_lo <= o["strike"] / S <= pos_hi] or book_dte
 
-    gex_total, gex_strikes = gamma_exposure(book_dte, S, csize)
+    # --- Signe dealer : figé (fixed) ou déduit du skew (adaptive). Heuristique, voir en-tête. ---
+    # On prend le RR mensuel (skew structurel, moins bruité que le court terme) comme orientation.
+    rr_for_sign = risk_reversal(book, 30)
+    sc, sp, sign_info = dealer_signs(rr_for_sign)
+    signs = (sc, sp)
+
+    gex_total, gex_strikes = gamma_exposure(book_dte, S, csize, signs=signs)
     dex_total = delta_exposure(book_pos, S, csize)
-    flip = gamma_flip(book_dte, S, csize)
+    flip = gamma_flip(book_dte, S, csize, signs=signs)
     curve = term_structure(book, S)
     atm30 = min(curve, key=lambda c: abs(c["days"] - 30))["atm_iv"] if curve else None
     ivp, n = iv_percentile(asset, atm30) if atm30 else (None, 0)
@@ -888,13 +941,13 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
         "gamma_walls": gamma_walls(gex_strikes),
         "put_call": put_call_ratio(book_dte),
         "vol_smile": vol_smile(book_dte, S, band=(0.15 if crypto else 0.08)),
-        "gex_by_expiry": gex_by_expiry(book_dte, S, csize),
-        "gamma_profile": gamma_profile(book_dte, S, csize, span=(0.18 if crypto else 0.10)),
+        "gex_by_expiry": gex_by_expiry(book_dte, S, csize, signs=signs),
+        "gamma_profile": gamma_profile(book_dte, S, csize, span=(0.18 if crypto else 0.10), signs=signs),
         "rr_weekly": risk_reversal(book, max(1, round(eff_dte))),
         "rr_monthly": risk_reversal(book, 30),
         "rr_near_days": max(1, round(eff_dte)),
         "skew_term": skew_term,
-        "charm_vanna_opex": charm_vanna_opex(book, S, csize),
+        "charm_vanna_opex": charm_vanna_opex(book, S, csize, signs=signs),
         "vol_trigger_regime": ("range" if (flip and S >= flip) else "breakout" if flip else None),
         "term_regime": detect_term_regime(curve),
         "iv_percentile": ivp, "iv_history_points": n,
@@ -905,6 +958,19 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
         "display_band": display_band,
         "dte_days": eff_dte, "dte_default": default_dte,
     }
+    # --- Signe dealer : on calcule TOUJOURS les DEUX conventions, peu importe le mode actif ---
+    # Le mode (DEALER_SIGN_MODE) décide seulement lequel alimente le score et l'affichage.
+    # Mais les DEUX chiffres sont calculés et stockés chaque jour -> aucun trou si tu bascules.
+    metrics["dealer_sign"] = sign_info          # {mode, rr, flipped, reason} du mode ACTIF
+    fc, fp, _ = dealer_signs(rr_for_sign, mode="fixed")
+    ac, ap, ainfo = dealer_signs(rr_for_sign, mode="adaptive")
+    gex_fixed_tot,    _ = gamma_exposure(book_dte, S, csize, signs=(fc, fp))
+    gex_adapt_tot,    _ = gamma_exposure(book_dte, S, csize, signs=(ac, ap))
+    metrics["gex_fixed_musd"]    = round(gex_fixed_tot / 1e6, 1)   # GEX convention figée
+    metrics["gex_adaptive_musd"] = round(gex_adapt_tot / 1e6, 1)   # GEX convention skew
+    metrics["dealer_sign"]["adaptive_would"] = ainfo["reason"]
+    metrics["dealer_sign"]["adaptive_diverges"] = ((ac, ap) != signs)
+
     metrics["convergence"] = converge(metrics, catalyst_bias)
     # Historique PAR HORIZON. Le label vient de daily.py (snappé sur la vraie échéance) ;
     # sinon on le déduit du DTE pour savoir quelle série montrer (vue interactive).
@@ -918,16 +984,18 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
         dex_gex_history(asset, metrics["dex_total_musd"], metrics["gex_total_musd"],
                         metrics["convergence"]["score"], spot=S,
                         max_pain=metrics.get("max_pain"), rr=metrics.get("rr_weekly"),
-                        store=True, horizon=hz, levels=_lvlist)
+                        store=True, horizon=hz, levels=_lvlist,
+                        gex_fixed=metrics.get("gex_fixed_musd"),
+                        gex_adaptive=metrics.get("gex_adaptive_musd"))
     # Renvoie les 3 séries (pour basculer dans le dashboard) + celle du profil actif par défaut.
     metrics["histories"] = all_histories(asset)
     metrics["history"] = metrics["histories"].get(horizon, [])
 
     # --- Forecast dealer (charm/vanna) + matrice de scénarios : calculés sur le book ---
-    charm_d, vanna_1 = charm_vanna_flow(book_dte, S, csize)
+    charm_d, vanna_1 = charm_vanna_flow(book_dte, S, csize, signs=signs)
     metrics["charm_musd"] = round(charm_d / 1e6, 1)
     metrics["vanna_musd"] = round(vanna_1 / 1e6, 1)
-    metrics["scenario_matrix"] = scenario_matrix(book_dte, S, csize)
+    metrics["scenario_matrix"] = scenario_matrix(book_dte, S, csize, signs=signs)
     metrics["iv30"] = atm30
 
     # --- Indicateur de confiance (qualité des données) ---

@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-06-25-a"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-06-25-k"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer ---------------------------------------------
 # IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
@@ -92,43 +92,81 @@ STRIKE_MIN_RATIO, STRIKE_MAX_RATIO = 0.5, 1.5
 
 # ---- Catalogue des actifs ---------------------------------------------------
 ASSETS = {
-    "BTC": {"source": "deribit", "contract": 1.0,   "label": "BTC"},
-    "ETH": {"source": "deribit", "contract": 1.0,   "label": "ETH"},
-    "SPX": {"source": "cboe",    "contract": 100.0, "cboe": "_SPX", "label": "SPX"},
-    "NDX": {"source": "cboe",    "contract": 100.0, "cboe": "_NDX", "label": "NDX"},
-    "RUT": {"source": "cboe",    "contract": 100.0, "cboe": "_RUT", "label": "RUT"},
-    "VIX": {"source": "cboe",    "contract": 100.0, "cboe": "_VIX", "label": "VIX"},
-    "DJX": {"source": "cboe",    "contract": 100.0, "cboe": "_DJX", "label": "DJX"},
-    "UUP": {"source": "cboe",    "contract": 100.0, "cboe": "UUP",  "label": "UUP"},
-    "EWG": {"source": "cboe",    "contract": 100.0, "cboe": "EWG",  "label": "DE EWG"},
-    "EWQ": {"source": "cboe",    "contract": 100.0, "cboe": "EWQ",  "label": "FR EWQ"},
-    "CL":  {"source": "cboe",    "contract": 100.0, "cboe": "USO",  "label": "CL"},
-    "GC":  {"source": "cboe",    "contract": 100.0, "cboe": "GLD",  "label": "GC"},
-    "EU 6E": {"source": "cboe",  "contract": 100.0, "cboe": "FXE",  "label": "EU 6E"},
-    "JP 6J": {"source": "cboe",  "contract": 100.0, "cboe": "FXY",  "label": "JP 6J"},
-    # Fallback si _NDX indisponible : décommente la ligne ci-dessous
-    # "NDX": {"source": "cboe", "contract": 100.0, "cboe": "QQQ", "label": "Nasdaq (QQQ)"},
+    # ---------- CRYPTO (Deribit) ----------
+    "BTC": {"source": "deribit", "contract": 1.0, "label": "BTC", "cat": "crypto", "group": "Majeures"},
+    "ETH": {"source": "deribit", "contract": 1.0, "label": "ETH", "cat": "crypto", "group": "Majeures"},
+    "SOL":  {"source": "deribit", "contract": 10.0,    "label": "SOL",  "cat": "crypto", "group": "Altcoins"},
+    "XRP":  {"source": "deribit", "contract": 1000.0,  "label": "XRP",  "cat": "crypto", "group": "Altcoins"},
+    "AVAX": {"source": "deribit", "contract": 100.0,   "label": "AVAX", "cat": "crypto", "group": "Altcoins"},
+    "TRX":  {"source": "deribit", "contract": 10000.0, "label": "TRX",  "cat": "crypto", "group": "Altcoins"},
+    "HYPE": {"source": "deribit", "contract": 10.0,    "label": "HYPE", "cat": "crypto", "group": "Altcoins"},
+    # ---------- MACRO (CBOE) ----------
+    # Indices US
+    "SPX": {"source": "cboe", "contract": 100.0, "cboe": "_SPX", "label": "SPX", "cat": "macro", "group": "Indices US"},
+    "NDX": {"source": "cboe", "contract": 100.0, "cboe": "_NDX", "label": "NDX", "cat": "macro", "group": "Indices US"},
+    "RUT": {"source": "cboe", "contract": 100.0, "cboe": "_RUT", "label": "RUT", "cat": "macro", "group": "Indices US"},
+    "DJX": {"source": "cboe", "contract": 100.0, "cboe": "_DJX", "label": "DJX", "cat": "macro", "group": "Indices US"},
+    "VIX": {"source": "cboe", "contract": 100.0, "cboe": "_VIX", "label": "VIX", "cat": "macro", "group": "Indices US"},
+    # ETF larges
+    "SPY": {"source": "cboe", "contract": 100.0, "cboe": "SPY", "label": "SPY", "cat": "macro", "group": "ETF larges"},
+    "QQQ": {"source": "cboe", "contract": 100.0, "cboe": "QQQ", "label": "QQQ", "cat": "macro", "group": "ETF larges"},
+    "IWM": {"source": "cboe", "contract": 100.0, "cboe": "IWM", "label": "IWM", "cat": "macro", "group": "ETF larges"},
+    "DIA": {"source": "cboe", "contract": 100.0, "cboe": "DIA", "label": "DIA", "cat": "macro", "group": "ETF larges"},
+    # Secteurs
+    "XLF": {"source": "cboe", "contract": 100.0, "cboe": "XLF", "label": "XLF banques", "cat": "macro", "group": "Secteurs"},
+    "XLE": {"source": "cboe", "contract": 100.0, "cboe": "XLE", "label": "XLE énergie", "cat": "macro", "group": "Secteurs"},
+    "XLK": {"source": "cboe", "contract": 100.0, "cboe": "XLK", "label": "XLK tech", "cat": "macro", "group": "Secteurs"},
+    "SMH": {"source": "cboe", "contract": 100.0, "cboe": "SMH", "label": "SMH semis", "cat": "macro", "group": "Secteurs"},
+    # International (pays)
+    "EWG": {"source": "cboe", "contract": 100.0, "cboe": "EWG", "label": "Allemagne (EWG)", "cat": "macro", "group": "International"},
+    "EWQ": {"source": "cboe", "contract": 100.0, "cboe": "EWQ", "label": "France (EWQ)", "cat": "macro", "group": "International"},
+    # Matières premières
+    "GC":  {"source": "cboe", "contract": 100.0, "cboe": "GLD", "label": "Or (GLD)", "cat": "macro", "group": "Matières premières"},
+    "SLV": {"source": "cboe", "contract": 100.0, "cboe": "SLV", "label": "Argent (SLV)", "cat": "macro", "group": "Matières premières"},
+    "CL":  {"source": "cboe", "contract": 100.0, "cboe": "USO", "label": "Pétrole (USO)", "cat": "macro", "group": "Matières premières"},
+    "UNG": {"source": "cboe", "contract": 100.0, "cboe": "UNG", "label": "Gaz (UNG)", "cat": "macro", "group": "Matières premières"},
+    # Devises
+    "UUP": {"source": "cboe", "contract": 100.0, "cboe": "UUP", "label": "Dollar (UUP)", "cat": "macro", "group": "Devises"},
+    "EU 6E": {"source": "cboe", "contract": 100.0, "cboe": "FXE", "label": "Euro (FXE)", "cat": "macro", "group": "Devises"},
+    "JP 6J": {"source": "cboe", "contract": 100.0, "cboe": "FXY", "label": "Yen (FXY)", "cat": "macro", "group": "Devises"},
+    # Taux / obligations
+    "TLT": {"source": "cboe", "contract": 100.0, "cboe": "TLT", "label": "Treasuries 20a (TLT)", "cat": "macro", "group": "Taux / oblig"},
+    "HYG": {"source": "cboe", "contract": 100.0, "cboe": "HYG", "label": "High yield (HYG)", "cat": "macro", "group": "Taux / oblig"},
 }
 
 
 # =============================================================================
 #  GREEKS — Black-Scholes (utilisé seulement quand la source ne les fournit pas)
 # =============================================================================
-def _d1(S, K, T, sigma, r=0.0):
+# PORTAGE (carry) : par défaut le moteur tourne SANS portage -> r=0, q=0.
+#   - Crypto (Deribit) : q=0 (pas de dividende) et r~0 est la convention standard ;
+#     les greeks crypto sont calculés ici par Black-Scholes.
+#   - Indices/ETF (CBOE) : les greeks PRIMAIRES viennent de CBOE (qui intègrent déjà
+#     le vrai taux et le dividende via les prix de marché) ; BS n'est qu'un secours.
+# Pour les horizons courts que vise l'outil, l'effet de r/q est faible. Si tu veux
+# activer le portage globalement, mets RISK_FREE à ta valeur (ex. 0.045) ; q reste
+# par option (défaut 0) car il ne compte vraiment que sur indices, déjà couverts par CBOE.
+# C'est documenté et explicite : pas de fausse précision cachée.
+RISK_FREE = 0.0            # taux sans risque annualisé appliqué aux greeks BS (0 = carry-free)
+
+
+def _d1(S, K, T, sigma, r=None, q=0.0):
+    r = RISK_FREE if r is None else r
     if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
         return None
-    return (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    return (math.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
 
-def bs_gamma(S, K, T, sigma):
+def bs_gamma(S, K, T, sigma, r=None, q=0.0):
     T = max(T, T_FLOOR)                     # évite l'explosion gamma des 0DTE
-    d1 = _d1(S, K, T, sigma)
-    return 0.0 if d1 is None else norm.pdf(d1) / (S * sigma * math.sqrt(T))
+    d1 = _d1(S, K, T, sigma, r, q)
+    return 0.0 if d1 is None else math.exp(-q * T) * norm.pdf(d1) / (S * sigma * math.sqrt(T))
 
-def bs_delta(S, K, T, sigma, is_call):
-    d1 = _d1(S, K, T, sigma)
+def bs_delta(S, K, T, sigma, is_call, r=None, q=0.0):
+    d1 = _d1(S, K, T, sigma, r, q)
     if d1 is None:
         return 0.0
-    return norm.cdf(d1) if is_call else norm.cdf(d1) - 1.0
+    disc = math.exp(-q * T)
+    return disc * norm.cdf(d1) if is_call else disc * (norm.cdf(d1) - 1.0)
 
 
 # =============================================================================
@@ -144,11 +182,37 @@ def _deribit_get(endpoint, **params):
         raise RuntimeError(data["error"])
     return data["result"]
 
+# Indices spot Deribit par coin. Les altcoins (DERIBIT_LINEAR) sont des options
+# USDC linéaires : leur book est rangé sous currency="USDC" (pas sous le nom du coin),
+# et le point décimal des strikes est encodé en 'd' (ex. 0d5 = 0.5).
+DERIBIT_INDEX = {
+    "BTC": "btc_usd", "ETH": "eth_usd",
+    "SOL": "sol_usdc", "XRP": "xrp_usdc", "AVAX": "avax_usdc",
+    "TRX": "trx_usdc", "HYPE": "hype_usdc",
+}
+DERIBIT_LINEAR = {"SOL", "XRP", "AVAX", "TRX", "HYPE"}
+_USDC_BOOK = {"ts": 0.0, "rows": None}
+
+def _usdc_book():
+    """Book complet des options USDC (toutes bases), en cache 60 s pour ne pas
+    re-télécharger les ~3000 lignes à chaque altcoin pendant daily.py."""
+    import time as _t
+    now = _t.time()
+    if _USDC_BOOK["rows"] is not None and now - _USDC_BOOK["ts"] < 60:
+        return _USDC_BOOK["rows"]
+    rows = _deribit_get("public/get_book_summary_by_currency", currency="USDC", kind="option")
+    _USDC_BOOK["ts"], _USDC_BOOK["rows"] = now, rows
+    return rows
+
 def ingest_deribit(currency):
-    idx = {"BTC": "btc_usd", "ETH": "eth_usd"}[currency]
+    idx = DERIBIT_INDEX[currency]
     S = _deribit_get("public/get_index_price", index_name=idx)["index_price"]
-    rows = _deribit_get("public/get_book_summary_by_currency",
-                        currency=currency, kind="option")
+    if currency in DERIBIT_LINEAR:
+        prefix = f"{currency}_USDC-"
+        rows = [x for x in _usdc_book() if x.get("instrument_name", "").startswith(prefix)]
+    else:
+        rows = _deribit_get("public/get_book_summary_by_currency",
+                            currency=currency, kind="option")
     now = dt.datetime.now(dt.timezone.utc)
     book = []
     for x in rows:
@@ -157,7 +221,7 @@ def ingest_deribit(currency):
             continue
         _, exp_str, strike_str, cp = parts
         try:
-            strike = float(strike_str)
+            strike = float(strike_str.replace("d", "."))   # Deribit encode le point décimal en 'd' (0d5 = 0.5)
             expiry = dt.datetime.strptime(exp_str, "%d%b%y").replace(
                 hour=8, tzinfo=dt.timezone.utc)
         except ValueError:
@@ -317,8 +381,9 @@ def gamma_flip(book, S, csize, span=0.20, steps=41, signs=None):
 
 
 def bs_charm(S, K, T, sigma, is_call):
-    """dDelta/dT (variation du delta avec le temps, par an). r=q=0."""
-    d1 = _d1(S, K, T, sigma)
+    """dDelta/dT (variation du delta avec le temps, par an). Approximation sans portage
+    (r=q=0) : effet du second ordre, négligeable sur les horizons courts visés."""
+    d1 = _d1(S, K, T, sigma, r=0.0, q=0.0)
     if d1 is None:
         return 0.0
     d2 = d1 - sigma * math.sqrt(T)
@@ -326,8 +391,9 @@ def bs_charm(S, K, T, sigma, is_call):
 
 
 def bs_vanna(S, K, T, sigma):
-    """dDelta/dVol (variation du delta avec la vol, pour 1.00 de vol). r=q=0."""
-    d1 = _d1(S, K, T, sigma)
+    """dDelta/dVol (variation du delta avec la vol, pour 1.00 de vol). Approximation sans
+    portage (r=q=0) : effet du second ordre, négligeable sur les horizons courts visés."""
+    d1 = _d1(S, K, T, sigma, r=0.0, q=0.0)
     if d1 is None:
         return 0.0
     d2 = d1 - sigma * math.sqrt(T)
@@ -377,10 +443,17 @@ def scenario_matrix(book, S, csize, moves=(-0.10, -0.05, -0.02, 0.0, 0.02, 0.05,
 
 
 def delta_exposure(book, S, csize):
-    # Delta net agrégé du book : le delta porte déjà son signe (call >0, put <0).
-    # Pas de double signe -> la valeur peut être positive OU négative selon le
-    # positionnement réel, au lieu de toujours ressortir positive.
+    # DEX "POSITIONNEMENT" : delta net agrégé du book, le delta porte déjà son signe
+    # (call >0, put <0). PAS de signe dealer ici -> lecture directionnelle du marché.
     return sum(o["delta"] * o["oi"] * csize * S for o in book)
+
+def delta_exposure_dealer(book, S, csize, signs=None):
+    # DEX "FLUX DE COUVERTURE" : applique le signe dealer (comme le GEX). C'est le delta
+    # net que portent les DEALERS. dex_dealer > 0 = dealers longs delta -> ils VENDENT du
+    # spot pour rester neutres ; dex_dealer < 0 = courts -> ils ACHÈTENT. Heuristique
+    # (même hypothèse de signe que le GEX), pas une vérité.
+    sc, sp = signs if signs else (SIGN_CALL, SIGN_PUT)
+    return sum((sc if o["type"] == "C" else sp) * o["delta"] * o["oi"] * csize * S for o in book)
 
 def max_pain(book):
     strikes = sorted({o["strike"] for o in book})
@@ -571,7 +644,8 @@ def deribit_funding(currency):
     """Funding 8h du perpétuel (crypto seulement). Renvoie None si indisponible :
     le dashboard affichera alors 'DONNÉE MANQUANTE' au lieu de planter."""
     try:
-        t = _deribit_get("public/ticker", instrument_name=f"{currency}-PERPETUAL")
+        perp = f"{currency}_USDC-PERPETUAL" if currency in DERIBIT_LINEAR else f"{currency}-PERPETUAL"
+        t = _deribit_get("public/ticker", instrument_name=perp)
         f8 = t.get("funding_8h")
         if f8 is None:
             return None
@@ -614,13 +688,14 @@ def iv_percentile(asset, atm_iv_30d):
 
 
 def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=None, rr=None,
-                    store=True, horizon="long", levels=None, gex_fixed=None, gex_adaptive=None):
+                    store=True, horizon="long", levels=None, gex_fixed=None, gex_adaptive=None,
+                    dex_dealer_fixed=None, dex_dealer_adaptive=None):
     """Historique PAR HORIZON. store=False = lecture seule. Seul daily.py écrit.
     levels = liste ordonnée [L1,L2,L3,L4,L5] de verdicts (BULL/BEAR/NEUTRAL) — colonnes 8-12.
-    gex_fixed / gex_adaptive = le GEX calculé avec CHAQUE convention de signe, écrits TOUS LES
-    DEUX chaque jour (colonnes 13-14), quel que soit le mode actif. Le mode ne change que ce
-    qu'on REGARDE, jamais ce qu'on ENREGISTRE -> aucun trou si tu bascules un jour.
-    Compat ascendante : les vieux fichiers (7 ou 12 colonnes) restent lus tels quels."""
+    gex_fixed / gex_adaptive (col 13-14) ET dex_dealer_fixed / dex_dealer_adaptive (col 15-16) :
+    le GEX et le DEX-dealer dans CHAQUE convention de signe, écrits TOUS chaque jour quel que soit
+    le mode actif. Le mode ne change que ce qu'on REGARDE, jamais ce qu'on ENREGISTRE.
+    Compat ascendante : les vieux fichiers (7, 12 ou 14 colonnes) restent lus tels quels."""
     os.makedirs(HIST_DIR, exist_ok=True)
     path = os.path.join(HIST_DIR, f"{asset}_{horizon}_dexgex.csv")
     today = dt.date.today().isoformat()
@@ -644,6 +719,8 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
                 "rr": _f(p[6]) if len(p) >= 7 else None,
                 "gex_fixed": _f(p[12]) if len(p) >= 13 else None,
                 "gex_adaptive": _f(p[13]) if len(p) >= 14 else None,
+                "dex_dealer_fixed": _f(p[14]) if len(p) >= 15 else None,
+                "dex_dealer_adaptive": _f(p[15]) if len(p) >= 16 else None,
                 "levels": lv}
 
     def _row(h):
@@ -652,7 +729,8 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
         lcols = ",".join(str(lv.get(k, "") or "") for k in LKEYS)
         return (f"{h['date']},{s(h['dex'])},{s(h['gex'])},{s(h['score'])},"
                 f"{s(h['spot'])},{s(h['max_pain'])},{s(h.get('rr'))},{lcols},"
-                f"{s(h.get('gex_fixed'))},{s(h.get('gex_adaptive'))}\n")
+                f"{s(h.get('gex_fixed'))},{s(h.get('gex_adaptive'))},"
+                f"{s(h.get('dex_dealer_fixed'))},{s(h.get('dex_dealer_adaptive'))}\n")
 
     hist = []
     if os.path.exists(path):
@@ -670,7 +748,8 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
             lv[k] = levels[i] if i < len(levels) else None
     point = {"date": today, "dex": dex_musd, "gex": gex_musd, "score": score,
              "spot": spot, "max_pain": max_pain, "rr": rr, "levels": lv,
-             "gex_fixed": gex_fixed, "gex_adaptive": gex_adaptive}
+             "gex_fixed": gex_fixed, "gex_adaptive": gex_adaptive,
+             "dex_dealer_fixed": dex_dealer_fixed, "dex_dealer_adaptive": dex_dealer_adaptive}
     if not hist or hist[-1]["date"] != today:
         with open(path, "a") as f:
             f.write(_row(point))
@@ -697,6 +776,7 @@ TH = {
     "rr_bull":  1.0,             # risk reversal au-dessus = appétit haussier
     "ivp_calme": 30,             # IV percentile bas = liquidité confortable
     "ivp_stress": 70,            # IV percentile haut = stress de liquidité
+    "catalyst_kink": 2.5,        # |RR court - RR mensuel| (pts IV) au-delà = catalyseur imminent
 }
 
 def _vote(direction, strength, reason):
@@ -727,12 +807,14 @@ def level_positioning(m):
     return _vote("NEUTRAL", 0.3, f"Risk reversal {rr} : skew neutre")
 
 def level_structure(m):
-    """L3 — term structure."""
+    """L3 — term structure. Mesure le STRESS, pas la direction : la backwardation
+    (vol court terme qui flambe) = stress immédiat, légèrement baissier ; le contango
+    = simplement calme, donc NEUTRE (un marché calme n'est pas haussier en soi)."""
     reg = m["term_regime"]
     if reg.startswith("BACKWARDATION"):
         return _vote("BEAR", 0.7, "Backwardation : stress immédiat anticipé")
     if reg.startswith("CONTANGO"):
-        return _vote("BULL", 0.4, "Contango : pas de stress, conditions calmes")
+        return _vote("NEUTRAL", 0.25, "Contango : conditions calmes, pas de signal directionnel")
     return _vote("NEUTRAL", 0.2, "Term structure plate")
 
 def level_liquidity(m):
@@ -747,10 +829,24 @@ def level_liquidity(m):
     return _vote("NEUTRAL", 0.2, f"IV percentile {ivp} : régime médian")
 
 def level_catalyst(m, catalyst_bias=None):
-    """L5 — événements / news. Hook : branche ici un flux news ou un override IA."""
+    """L5 — catalyseur. Deux entrées :
+      1) override manuel directionnel (catalyst_bias) si tu sais qu'un événement va dans un sens ;
+      2) sinon, détection AUTO d'un catalyseur IMMINENT via le 'kink' de skew : quand la peur
+         est concentrée sur le court terme (RR court << RR mensuel), le marché price un événement
+         proche. Sa DIRECTION est inconnue -> on reste NEUTRE (on ne devine pas le sens), mais on
+         lève un drapeau 'catalyst_imminent' qui RÉDUIRA la conviction (on trim avant l'événement).
+    Plus de niveau inerte : L5 lit maintenant une vraie donnée."""
     if catalyst_bias in ("BULL", "BEAR"):
-        return _vote(catalyst_bias, 0.6, "Catalyseur externe fourni")
-    return _vote("NEUTRAL", 0.0, "Aucun catalyseur connu (à brancher)")
+        return _vote(catalyst_bias, 0.6, "Catalyseur externe fourni (override manuel)")
+    rr_c, rr_m = m.get("rr_weekly"), m.get("rr_monthly")
+    if rr_c is not None and rr_m is not None:
+        kink = rr_c - rr_m                       # court - mensuel ; très négatif = peur front-loaded
+        if kink <= -TH["catalyst_kink"]:
+            v = _vote("NEUTRAL", 0.0,
+                      f"Catalyseur imminent détecté (peur court terme, kink {kink:+.1f}) — direction inconnue")
+            v["catalyst_imminent"] = True
+            return v
+    return _vote("NEUTRAL", 0.0, "Aucun catalyseur imminent détecté")
 
 def converge(metrics, catalyst_bias=None):
     levels = {
@@ -795,11 +891,17 @@ def converge(metrics, catalyst_bias=None):
     stress_penalty = 1.0 - min(0.5, max(0.0, (stress - 5) / 10))
     sizing = round(base * stress_penalty, 2)
 
+    # --- L5 : catalyseur imminent (direction inconnue) -> on trim la taille avant l'événement ---
+    catalyst_imminent = bool(levels["L5_CATALYST"].get("catalyst_imminent"))
+    if catalyst_imminent:
+        sizing = round(sizing * 0.85, 2)
+
     return {
         "score": score, "direction": direction, "conviction": conviction,
         "aligned": aligned, "bulls": bulls, "bears": bears,
         "stress": stress, "stress_label": stress_label,
         "sizing": sizing, "levels": levels,
+        "catalyst_imminent": catalyst_imminent,
     }
 
 
@@ -860,6 +962,8 @@ def _read_history_file(asset, horizon):
                         "rr": f(p[6]) if len(p) >= 7 else None,
                         "gex_fixed": f(p[12]) if len(p) >= 13 else None,
                         "gex_adaptive": f(p[13]) if len(p) >= 14 else None,
+                        "dex_dealer_fixed": f(p[14]) if len(p) >= 15 else None,
+                        "dex_dealer_adaptive": f(p[15]) if len(p) >= 16 else None,
                         "levels": lv})
     return out[-90:]
 
@@ -874,7 +978,7 @@ def fetch_chain(asset):
     cfg = ASSETS[asset]
     return (ingest_deribit(asset) if cfg["source"] == "deribit" else ingest_cboe(cfg))
 
-def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefetched=None, horizon=None):
+def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefetched=None, horizon=None, sign_mode=None):
     asset = asset.upper()
     if asset not in ASSETS:
         raise ValueError(f"Actif inconnu : {asset}. Dispo : {list(ASSETS)}")
@@ -908,11 +1012,12 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     # --- Signe dealer : figé (fixed) ou déduit du skew (adaptive). Heuristique, voir en-tête. ---
     # On prend le RR mensuel (skew structurel, moins bruité que le court terme) comme orientation.
     rr_for_sign = risk_reversal(book, 30)
-    sc, sp, sign_info = dealer_signs(rr_for_sign)
+    sc, sp, sign_info = dealer_signs(rr_for_sign, mode=sign_mode)   # sign_mode=None -> réglage global
     signs = (sc, sp)
 
     gex_total, gex_strikes = gamma_exposure(book_dte, S, csize, signs=signs)
-    dex_total = delta_exposure(book_pos, S, csize)
+    dex_total = delta_exposure(book_pos, S, csize)                      # DEX positionnement (brut)
+    dex_dealer = delta_exposure_dealer(book_pos, S, csize, signs=signs) # DEX flux couverture (signé, mode actif)
     flip = gamma_flip(book_dte, S, csize, signs=signs)
     curve = term_structure(book, S)
     atm30 = min(curve, key=lambda c: abs(c["days"] - 30))["atm_iv"] if curve else None
@@ -934,6 +1039,8 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
         "gex_regime": "ANCRAGE (range)" if gex_total > 0 else "AMPLIFICATION (cassure)",
         "dex_total_musd": round(dex_total / 1e6, 1),
         "dex_flux": "haussier" if dex_total > 0 else "baissier",
+        "dex_dealer_musd": round(dex_dealer / 1e6, 1),                    # DEX signé dealer (flux de couverture)
+        "dex_dealer_flux": "vendeur" if dex_dealer > 0 else "acheteur",   # dex_dealer>0 -> dealers vendent le spot
         "max_pain": mp, "max_pain_vs_spot_pct": round(100 * (mp - S) / S, 2),
         "gamma_flip": flip, "vol_trigger": flip,
         "flip_vs_spot_pct": (round(100 * (flip - S) / S, 2) if flip else None),
@@ -968,6 +1075,9 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     gex_adapt_tot,    _ = gamma_exposure(book_dte, S, csize, signs=(ac, ap))
     metrics["gex_fixed_musd"]    = round(gex_fixed_tot / 1e6, 1)   # GEX convention figée
     metrics["gex_adaptive_musd"] = round(gex_adapt_tot / 1e6, 1)   # GEX convention skew
+    # DEX dealer dans les DEUX conventions aussi (même logique : on collecte tout, tout le temps)
+    metrics["dex_dealer_fixed_musd"]    = round(delta_exposure_dealer(book_pos, S, csize, signs=(fc, fp)) / 1e6, 1)
+    metrics["dex_dealer_adaptive_musd"] = round(delta_exposure_dealer(book_pos, S, csize, signs=(ac, ap)) / 1e6, 1)
     metrics["dealer_sign"]["adaptive_would"] = ainfo["reason"]
     metrics["dealer_sign"]["adaptive_diverges"] = ((ac, ap) != signs)
 
@@ -986,7 +1096,9 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
                         max_pain=metrics.get("max_pain"), rr=metrics.get("rr_weekly"),
                         store=True, horizon=hz, levels=_lvlist,
                         gex_fixed=metrics.get("gex_fixed_musd"),
-                        gex_adaptive=metrics.get("gex_adaptive_musd"))
+                        gex_adaptive=metrics.get("gex_adaptive_musd"),
+                        dex_dealer_fixed=metrics.get("dex_dealer_fixed_musd"),
+                        dex_dealer_adaptive=metrics.get("dex_dealer_adaptive_musd"))
     # Renvoie les 3 séries (pour basculer dans le dashboard) + celle du profil actif par défaut.
     metrics["histories"] = all_histories(asset)
     metrics["history"] = metrics["histories"].get(horizon, [])

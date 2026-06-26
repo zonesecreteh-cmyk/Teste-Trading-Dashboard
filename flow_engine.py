@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-06-25-k"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-06-25-w"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer ---------------------------------------------
 # IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
@@ -640,6 +640,100 @@ def gamma_walls(gex_strikes):
     put_wall = min(neg, key=lambda kv: kv[1])[0] if neg else None
     return {"call_wall": call_wall, "put_wall": put_wall}
 
+def coinbase_premium(currency, ref_price):
+    """Premium Coinbase vs l'indice de référence Deribit (déjà fetché) en points de base.
+    >0 = Coinbase au-dessus -> demande institutionnelle US ; <0 = US vendent.
+    API Coinbase publique sans clé, BTC/ETH uniquement. None si indispo (la carte montre alors
+    DONNÉE MANQUANTE au lieu de planter)."""
+    if currency not in ("BTC", "ETH") or not ref_price:
+        return None
+    try:
+        r = requests.get(f"https://api.coinbase.com/v2/prices/{currency}-USD/spot",
+                         timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        cb = float(r.json()["data"]["amount"])
+        bps = round((cb - ref_price) / ref_price * 10000, 1)
+        return {"bps": bps, "coinbase": round(cb, 2), "ref": round(ref_price, 2)}
+    except Exception:
+        return None
+
+_STABLE_CACHE = {"ts": 0.0, "data": None}
+
+def stablecoins():
+    """Supply USDT + USDC (dry powder dispo pour acheter du crypto) via CoinGecko
+    (API publique sans clé). Cache 5 min. None si indispo (carte = DONNÉE MANQUANTE)."""
+    import time as _t
+    now = _t.time()
+    if _STABLE_CACHE["data"] is not None and now - _STABLE_CACHE["ts"] < 300:
+        return _STABLE_CACHE["data"]
+    try:
+        r = requests.get("https://api.coingecko.com/api/v3/coins/markets",
+                         params={"vs_currency": "usd", "ids": "tether,usd-coin"},
+                         timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        j = r.json()
+        out = []
+        for sym, cid in [("USDT", "tether"), ("USDC", "usd-coin")]:
+            row = next((x for x in j if x.get("id") == cid), None)
+            if row:
+                out.append({"coin": sym,
+                            "supply_b": round((row.get("market_cap") or 0) / 1e9, 1),
+                            "chg24h": round(row.get("market_cap_change_percentage_24h") or 0, 2)})
+        if not out:
+            return None
+        _STABLE_CACHE["ts"], _STABLE_CACHE["data"] = now, out
+        return out
+    except Exception:
+        return None
+
+def block_trades(currency, ref_price, min_notional=1_000_000):
+    """Gros trades d'options (≥ 1M$ notionnel) sur 24h via Deribit get_last_trades_by_currency.
+    Agrège flux net call/put + top strikes ciblés. BTC/ETH seulement. None si indispo."""
+    if currency not in ("BTC", "ETH") or not ref_price:
+        return None
+    try:
+        import time as _t
+        cutoff = int(_t.time() * 1000) - 24 * 3600 * 1000
+        res = _deribit_get("public/get_last_trades_by_currency",
+                           currency=currency, kind="option", count=1000)
+        blocks = []
+        for t in res.get("trades", []):
+            if (t.get("timestamp") or 0) < cutoff:
+                continue
+            parts = t.get("instrument_name", "").split("-")
+            if len(parts) != 4:
+                continue
+            cp = parts[3].upper()
+            try:
+                strike = float(parts[2].replace("d", "."))
+            except ValueError:
+                continue
+            ipx = t.get("index_price") or ref_price
+            notional = (t.get("amount") or 0) * ipx
+            if notional < min_notional:
+                continue
+            signed = notional if t.get("direction") == "buy" else -notional
+            blocks.append((cp, strike, signed, notional))
+        if not blocks:
+            return {"count": 0, "total_musd": 0.0, "net_call_musd": 0.0,
+                    "net_put_musd": 0.0, "top": [], "bias": "AUCUN"}
+        net_call = sum(s for cp, _, s, _ in blocks if cp == "C")
+        net_put = sum(s for cp, _, s, _ in blocks if cp == "P")
+        total = sum(n for _, _, _, n in blocks)
+        agg = {}
+        for cp, strike, signed, _ in blocks:
+            agg[(cp, strike)] = agg.get((cp, strike), 0) + signed
+        top = sorted(agg.items(), key=lambda kv: abs(kv[1]), reverse=True)[:5]
+        top_list = [{"cp": k[0], "strike": k[1], "flux_musd": round(v / 1e6, 1)} for k, v in top]
+        bias = "MIXTE"
+        if net_call > 0 and net_put <= 0:
+            bias = "HAUSSIER"
+        elif net_call < 0 and net_put >= 0:
+            bias = "BAISSIER"
+        return {"count": len(blocks), "total_musd": round(total / 1e6, 1),
+                "net_call_musd": round(net_call / 1e6, 1), "net_put_musd": round(net_put / 1e6, 1),
+                "top": top_list, "bias": bias}
+    except Exception:
+        return None
+
 def deribit_funding(currency):
     """Funding 8h du perpétuel (crypto seulement). Renvoie None si indisponible :
     le dashboard affichera alors 'DONNÉE MANQUANTE' au lieu de planter."""
@@ -1101,7 +1195,7 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
                         dex_dealer_adaptive=metrics.get("dex_dealer_adaptive_musd"))
     # Renvoie les 3 séries (pour basculer dans le dashboard) + celle du profil actif par défaut.
     metrics["histories"] = all_histories(asset)
-    metrics["history"] = metrics["histories"].get(horizon, [])
+    metrics["history"] = metrics["histories"].get(hz, [])
 
     # --- Forecast dealer (charm/vanna) + matrice de scénarios : calculés sur le book ---
     charm_d, vanna_1 = charm_vanna_flow(book_dte, S, csize, signs=signs)
@@ -1127,9 +1221,10 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     # --- Champs nécessitant une source externe non branchée : explicitement None ---
     # Le dashboard affiche "DONNÉE MANQUANTE" pour chacun.
     metrics["funding"] = (deribit_funding(asset) if cfg["source"] == "deribit" else None)
-    metrics["coinbase_premium"] = None    # Coinbase premium -> autre source
+    metrics["coinbase_premium"] = (coinbase_premium(asset, S) if cfg["source"] == "deribit" else None)
+    metrics["stablecoins"] = (stablecoins() if cfg["source"] == "deribit" else None)
+    metrics["block_trades"] = (block_trades(asset, S) if cfg["source"] == "deribit" else None)
     metrics["oi_by_exchange"] = None      # OI Binance/Bybit/OKX -> autre source
-    metrics["block_trades"] = None        # block trades >1M$ -> flux de trades Deribit
     metrics["oi_change_24h"] = None       # variation OI 24h -> 2+ jours de snapshots
     metrics["stablecoin_supply"] = None   # supply USDT/USDC -> source on-chain
     return metrics

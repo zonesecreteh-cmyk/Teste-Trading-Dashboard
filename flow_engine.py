@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-06-25-w"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-07-02-f"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer ---------------------------------------------
 # IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
@@ -148,6 +148,10 @@ ASSETS = {
 # par option (défaut 0) car il ne compte vraiment que sur indices, déjà couverts par CBOE.
 # C'est documenté et explicite : pas de fausse précision cachée.
 RISK_FREE = 0.0            # taux sans risque annualisé appliqué aux greeks BS (0 = carry-free)
+# Taux appliqué aux greeks SECONDAIRES (charm/vanna/vega/theta) des actifs MACRO (CBOE).
+# Les delta/gamma macro viennent de CBOE (carry déjà inclus) ; ce taux aligne nos greeks
+# internes dessus. Crypto reste à r=0 (convention standard options inverses Deribit).
+MACRO_RISK_FREE = 0.04
 
 
 def _d1(S, K, T, sigma, r=None, q=0.0):
@@ -167,6 +171,23 @@ def bs_delta(S, K, T, sigma, is_call, r=None, q=0.0):
         return 0.0
     disc = math.exp(-q * T)
     return disc * norm.cdf(d1) if is_call else disc * (norm.cdf(d1) - 1.0)
+
+def bs_vega(S, K, T, sigma, r=None, q=0.0):
+    T = max(T, T_FLOOR)
+    d1 = _d1(S, K, T, sigma, r, q)
+    return 0.0 if d1 is None else S * math.exp(-q * T) * norm.pdf(d1) * math.sqrt(T)
+
+def bs_theta(S, K, T, sigma, is_call, r=None, q=0.0):
+    r = RISK_FREE if r is None else r
+    T = max(T, T_FLOOR)
+    d1 = _d1(S, K, T, sigma, r, q)
+    if d1 is None:
+        return 0.0
+    d2 = d1 - sigma * math.sqrt(T)
+    term1 = -S * math.exp(-q * T) * norm.pdf(d1) * sigma / (2 * math.sqrt(T))
+    if is_call:
+        return term1 - r * K * math.exp(-r * T) * norm.cdf(d2) + q * S * math.exp(-q * T) * norm.cdf(d1)
+    return term1 + r * K * math.exp(-r * T) * norm.cdf(-d2) - q * S * math.exp(-q * T) * norm.cdf(-d1)
 
 
 # =============================================================================
@@ -380,27 +401,26 @@ def gamma_flip(book, S, csize, span=0.20, steps=41, signs=None):
     return None
 
 
-def bs_charm(S, K, T, sigma, is_call):
-    """dDelta/dT (variation du delta avec le temps, par an). Approximation sans portage
-    (r=q=0) : effet du second ordre, négligeable sur les horizons courts visés."""
-    d1 = _d1(S, K, T, sigma, r=0.0, q=0.0)
+def bs_charm(S, K, T, sigma, is_call, r=0.0):
+    """dDelta/dT (variation du delta avec le temps, par an). r=0 pour crypto (options
+    inverses) ; MACRO_RISK_FREE pour les actifs CBOE (aligné sur leurs greeks à carry)."""
+    d1 = _d1(S, K, T, sigma, r=r, q=0.0)
     if d1 is None:
         return 0.0
     d2 = d1 - sigma * math.sqrt(T)
     return -norm.pdf(d1) * d2 / (2 * T)
 
 
-def bs_vanna(S, K, T, sigma):
-    """dDelta/dVol (variation du delta avec la vol, pour 1.00 de vol). Approximation sans
-    portage (r=q=0) : effet du second ordre, négligeable sur les horizons courts visés."""
-    d1 = _d1(S, K, T, sigma, r=0.0, q=0.0)
+def bs_vanna(S, K, T, sigma, r=0.0):
+    """dDelta/dVol (variation du delta avec la vol, pour 1.00 de vol). r : voir bs_charm."""
+    d1 = _d1(S, K, T, sigma, r=r, q=0.0)
     if d1 is None:
         return 0.0
     d2 = d1 - sigma * math.sqrt(T)
     return -norm.pdf(d1) * d2 / sigma
 
 
-def charm_vanna_flow(book, S, csize, signs=None):
+def charm_vanna_flow(book, S, csize, signs=None, r=0.0):
     """
     Flux spot (M$) que les dealers doivent faire mécaniquement pour rester delta-neutres :
     - charm : à cause du passage du temps (sur 24h).
@@ -412,11 +432,48 @@ def charm_vanna_flow(book, S, csize, signs=None):
     vanna_1pt = 0.0
     for o in book:
         sign = sc if o["type"] == "C" else sp
-        ch = bs_charm(S, o["strike"], o["T"], o["iv"], o["type"] == "C")
-        vn = bs_vanna(S, o["strike"], o["T"], o["iv"])
+        ch = bs_charm(S, o["strike"], o["T"], o["iv"], o["type"] == "C", r=r)
+        vn = bs_vanna(S, o["strike"], o["T"], o["iv"], r=r)
         charm_daily += sign * (ch / 365.0) * o["oi"] * csize * S
         vanna_1pt += sign * (vn * 0.01) * o["oi"] * csize * S
     return charm_daily, vanna_1pt
+
+def vega_theta_exposure(book, S, csize, signs=None, r=0.0):
+    """VEX (M$ de P&L dealers par +1pt d'IV) et theta agrégé (M$/jour), dealer-signés,
+    même convention de signe que GEX/charm/vanna."""
+    sc, sp = signs if signs else (SIGN_CALL, SIGN_PUT)
+    vex = 0.0
+    theta_d = 0.0
+    for o in book:
+        sign = sc if o["type"] == "C" else sp
+        vex += sign * bs_vega(S, o["strike"], o["T"], o["iv"], r=r) * 0.01 * o["oi"] * csize
+        theta_d += sign * (bs_theta(S, o["strike"], o["T"], o["iv"], o["type"] == "C", r=r) / 365.0) * o["oi"] * csize
+    return vex, theta_d
+
+def expiry_calendar(book, S, csize, max_rows=8):
+    """Par échéance : jours restants, notionnel OI (M$), part du gamma total (%).
+    Sert à anticiper les 'marches d'escalier' quand une grosse échéance expire."""
+    now = dt.datetime.now(dt.timezone.utc)
+    agg = {}
+    tot_gamma = 0.0
+    for o in book:
+        g = abs((o.get("gamma") or 0.0) * o["oi"] * csize * (S ** 2) * 0.01)
+        n = o["oi"] * csize * S
+        a = agg.setdefault(o["expiry"].date(), {"notional": 0.0, "gamma": 0.0, "legs": []})
+        a["notional"] += n
+        a["gamma"] += g
+        a["legs"].append(o)
+        tot_gamma += g
+    rows = []
+    for e in sorted(agg):
+        days = max(0, (e - now.date()).days)
+        mp = max_pain(agg[e]["legs"])
+        rows.append({"date": e.isoformat(), "days": days,
+                     "max_pain": round(mp) if mp else None,
+                     "mp_dist_pct": round((mp / S - 1) * 100, 1) if mp else None,
+                     "notional_musd": round(agg[e]["notional"] / 1e6),
+                     "gamma_pct": round(100 * agg[e]["gamma"] / tot_gamma, 1) if tot_gamma > 0 else 0.0})
+    return {"rows": rows[:max_rows], "n_expiries": len(agg)}
 
 
 def scenario_matrix(book, S, csize, moves=(-0.10, -0.05, -0.02, 0.0, 0.02, 0.05, 0.10), signs=None):
@@ -483,7 +540,7 @@ def risk_reversal(book, target_days):
 def skew_term_at(book, dte):
     return risk_reversal(book, max(1, round(dte)))
 
-def charm_vanna_opex(book, S, csize, signs=None):
+def charm_vanna_opex(book, S, csize, signs=None, r=0.0):
     """Flux charm/vanna concentré sur la PROCHAINE GROSSE ÉCHÉANCE (OPEX mensuelle) — c'est là
     que les dealers ont le plus de delta à re-hedger mécaniquement. charm = delta à ajuster sur
     24h (passage du temps) ; vanna = delta à ajuster si l'IV bouge de +1 point. Moteur des
@@ -493,7 +550,7 @@ def charm_vanna_opex(book, S, csize, signs=None):
     leg = [o for o in book if o["expiry"] == exp]
     if not leg:
         return None
-    ch, vn = charm_vanna_flow(leg, S, csize, signs)
+    ch, vn = charm_vanna_flow(leg, S, csize, signs, r=r)
     now = dt.datetime.now(dt.timezone.utc)
     days = (exp - now).days if exp else None
     return {"charm_musd": round(ch / 1e6, 2), "vanna_musd": round(vn / 1e6, 2), "days": days}
@@ -666,17 +723,33 @@ def stablecoins():
     if _STABLE_CACHE["data"] is not None and now - _STABLE_CACHE["ts"] < 300:
         return _STABLE_CACHE["data"]
     try:
-        r = requests.get("https://api.coingecko.com/api/v3/coins/markets",
-                         params={"vs_currency": "usd", "ids": "tether,usd-coin"},
-                         timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-        j = r.json()
         out = []
-        for sym, cid in [("USDT", "tether"), ("USDC", "usd-coin")]:
-            row = next((x for x in j if x.get("id") == cid), None)
-            if row:
-                out.append({"coin": sym,
-                            "supply_b": round((row.get("market_cap") or 0) / 1e9, 1),
-                            "chg24h": round(row.get("market_cap_change_percentage_24h") or 0, 2)})
+        try:  # source primaire : CoinGecko
+            r = requests.get("https://api.coingecko.com/api/v3/coins/markets",
+                             params={"vs_currency": "usd", "ids": "tether,usd-coin"},
+                             timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                j = r.json()
+                for sym, cid in [("USDT", "tether"), ("USDC", "usd-coin")]:
+                    row = next((x for x in j if x.get("id") == cid), None)
+                    if row:
+                        out.append({"coin": sym,
+                                    "supply_b": round((row.get("market_cap") or 0) / 1e9, 1),
+                                    "chg24h": round(row.get("market_cap_change_percentage_24h") or 0, 2)})
+        except Exception:
+            out = []
+        if not out:  # fallback : DefiLlama (pas de rate-limit agressif)
+            r = requests.get("https://stablecoins.llama.fi/stablecoins",
+                             params={"includePrices": "false"},
+                             timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            for a in (r.json().get("peggedAssets") or []):
+                if a.get("symbol") in ("USDT", "USDC"):
+                    cur = ((a.get("circulating") or {}).get("peggedUSD")) or 0
+                    prev = ((a.get("circulatingPrevDay") or {}).get("peggedUSD")) or 0
+                    chg = round((cur / prev - 1) * 100, 2) if prev else 0.0
+                    out.append({"coin": a["symbol"], "supply_b": round(cur / 1e9, 1),
+                                "chg24h": chg})
+            out.sort(key=lambda x: x["coin"], reverse=True)  # USDT d'abord
         if not out:
             return None
         _STABLE_CACHE["ts"], _STABLE_CACHE["data"] = now, out
@@ -747,6 +820,62 @@ def deribit_funding(currency):
                 "annualized_pct": round(f8 * 3 * 365 * 100, 1)}   # 3 fenêtres de 8h/jour
     except Exception:
         return None
+
+def binance_funding(coin):
+    """Funding du perpétuel USDT Binance (premiumIndex). None si indispo / coin absent."""
+    try:
+        r = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex",
+                         params={"symbol": f"{coin}USDT"}, timeout=8,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None
+        f8 = r.json().get("lastFundingRate")
+        if f8 in (None, ""):
+            return None
+        f8 = float(f8)
+        return {"rate_8h_pct": round(f8 * 100, 4),
+                "annualized_pct": round(f8 * 3 * 365 * 100, 1)}
+    except Exception:
+        return None
+
+def bybit_funding(coin):
+    """Funding du perpétuel USDT Bybit (tickers v5). None si indispo / coin absent."""
+    try:
+        r = requests.get("https://api.bybit.com/v5/market/tickers",
+                         params={"category": "linear", "symbol": f"{coin}USDT"}, timeout=8,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None
+        lst = (r.json().get("result") or {}).get("list") or []
+        if not lst:
+            return None
+        fr = lst[0].get("fundingRate")
+        if fr in (None, ""):
+            return None
+        f8 = float(fr)
+        return {"rate_8h_pct": round(f8 * 100, 4),
+                "annualized_pct": round(f8 * 3 * 365 * 100, 1)}
+    except Exception:
+        return None
+
+def funding_multi(coin, deribit_res):
+    """Compare le funding Deribit / Binance / Bybit pour repérer une divergence
+    (= déséquilibre de levier entre plateformes, parfois arbitrable). Renvoie None
+    s'il n'y a pas au moins 2 plateformes pour comparer."""
+    rows = []
+    if deribit_res:
+        rows.append({"ex": "Deribit", "rate": deribit_res["rate_8h_pct"], "ann": deribit_res["annualized_pct"]})
+    bi = binance_funding(coin)
+    if bi:
+        rows.append({"ex": "Binance", "rate": bi["rate_8h_pct"], "ann": bi["annualized_pct"]})
+    by = bybit_funding(coin)
+    if by:
+        rows.append({"ex": "Bybit", "rate": by["rate_8h_pct"], "ann": by["annualized_pct"]})
+    if len(rows) < 2:
+        return None
+    rates = [r["rate"] for r in rows]
+    spread_bps = round((max(rates) - min(rates)) * 100, 2)   # rate en % -> *100 = bps du 8h
+    return {"rows": rows, "spread_bps": spread_bps, "diverge": spread_bps >= 1.0}
 
 def detect_term_regime(curve):
     pts = curve[:6]
@@ -950,24 +1079,31 @@ def converge(metrics, catalyst_bias=None):
         "L4_LIQUIDITE":    level_liquidity(metrics),
         "L5_CATALYST":     level_catalyst(metrics, catalyst_bias),
     }
-    sign = {"BULL": +1, "BEAR": -1, "NEUTRAL": 0}
-    # score brut = somme (direction × force), normalisé sur [-10, +10]
-    raw = sum(sign[v["verdict"]] * v["strength"] for v in levels.values())
-    score = round(max(-10, min(10, raw / 5 * 10)), 1)
+    # L3 (term structure) et L4 (IV) mesurent le STRESS / la vol, PAS la direction.
+    # Leur info est DÉJÀ dans le score de stress (iv_percentile + backwardation). On les
+    # exclut donc du vote directionnel pour ne pas fabriquer de fausse convergence
+    # (ex. "IV basse" comptée comme signal haussier). Direction = L1, L2, L5(override).
+    DIRECTIONAL = ("L1_REGIME", "L2_POSITIONING", "L5_CATALYST")
+    for k, v in levels.items():
+        v["kind"] = "directional" if k in DIRECTIONAL else "stress"
 
-    bulls = sum(1 for v in levels.values() if v["verdict"] == "BULL")
-    bears = sum(1 for v in levels.values() if v["verdict"] == "BEAR")
+    sign = {"BULL": +1, "BEAR": -1, "NEUTRAL": 0}
+    dir_votes = [levels[k] for k in DIRECTIONAL]
+    # score directionnel normalisé sur [-10,+10] (2.5 ≈ |raw| réaliste quand L1+L2 alignés forts)
+    raw = sum(sign[v["verdict"]] * v["strength"] for v in dir_votes)
+    score = round(max(-10, min(10, raw / 2.5 * 10)), 1)
+
+    bulls = sum(1 for v in dir_votes if v["verdict"] == "BULL")
+    bears = sum(1 for v in dir_votes if v["verdict"] == "BEAR")
     aligned = max(bulls, bears)
     direction = "HAUSSIER" if bulls > bears else "BAISSIER" if bears > bulls else "NEUTRE"
 
-    # --- règle de convergence (pas de moyenne molle) ---
-    # >=3 niveaux alignés -> conviction MODÉRÉE minimum imposée, NEUTRAL interdit
-    # <=2 alignés -> NEUTRAL acceptable sauf signal isolé très fort
-    if aligned >= 4:
+    # --- règle de convergence sur le noyau directionnel (L1, L2, +L5 si override) ---
+    if aligned >= 3:                              # L1+L2+L5 tous alignés = setup rare et fort
         conviction = "FORTE"
-    elif aligned >= 3:
+    elif aligned == 2:                            # L1 et L2 d'accord
         conviction = "MODÉRÉE"
-    elif aligned == 2 and abs(score) >= 3:        # 2 alignés + signal pas isolé
+    elif aligned == 1 and abs(score) >= 4:        # un seul signal mais marqué
         conviction = "FAIBLE"
     else:
         conviction, direction = "NEUTRE", "NEUTRE"
@@ -1065,6 +1201,178 @@ def all_histories(asset):
     """Renvoie les 3 séries d'historique (une par horizon) pour basculer côté dashboard."""
     return {h: _read_history_file(asset, h) for h, _ in HORIZONS}
 
+# === Historique DEX/GEX book TOTAL (toutes échéances agrégées) ====================
+# C'est la métrique "standard" des sites publics (Laevitas, CryptoGamma) et de la
+# plupart des vidéos : une photo du book ENTIER, pas d'une tranche DTE. 1 ligne/jour,
+# idempotent. Permet la comparaison jour-à-jour avec les modèles externes.
+def _total_hist_path(asset):
+    return os.path.join(HIST_DIR, f"{asset}_total_dexgex.csv")
+
+def record_total_history(asset, dex_musd, gex_musd, spot):
+    try:
+        os.makedirs(HIST_DIR, exist_ok=True)
+        date = dt.date.today().isoformat()
+        path = _total_hist_path(asset)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                if any(line.startswith(date + ",") for line in f):
+                    return
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{date},{dex_musd},{gex_musd},{spot}\n")
+    except Exception:
+        pass
+
+def read_total_history(asset):
+    try:
+        out = []
+        with open(_total_hist_path(asset), encoding="utf-8") as f:
+            for line in f:
+                p = line.strip().split(",")
+                if len(p) >= 3:
+                    out.append({"date": p[0], "dex": float(p[1]), "gex": float(p[2]),
+                                "spot": float(p[3]) if len(p) > 3 and p[3] else None})
+        return out[-90:]
+    except OSError:
+        return []
+
+# === IV Rank ======================================================================
+# Réutilise l'historique DÉJÀ collecté par iv_percentile ({asset}.csv) — pas de
+# fichier séparé. Place l'IV du jour dans sa distribution : 80 = plus haute que 80%
+# des jours enregistrés (optionalité chère). status='collecting' sous 5 jours.
+def iv_rank(asset, iv_now):
+    if iv_now is None:
+        return None
+    vals = []
+    try:
+        with open(os.path.join(HIST_DIR, f"{asset}.csv"), encoding="utf-8") as f:
+            for line in f:
+                p = line.strip().split(",")
+                if len(p) >= 2:
+                    try:
+                        vals.append(float(p[1]))
+                    except ValueError:
+                        pass
+        vals = vals[-90:]
+    except OSError:
+        vals = []
+    if len(vals) < 5:
+        return {"status": "collecting", "have": len(vals), "iv": iv_now}
+    rank = round(100 * sum(1 for v in vals if v <= iv_now) / len(vals))
+    return {"status": "ok", "iv": iv_now, "rank": rank, "days": len(vals),
+            "lo": round(min(vals), 1), "hi": round(max(vals), 1)}
+
+def futures_basis(currency):
+    """Basis annualisé des futures datés Deribit vs index (contango/backwardation).
+    BTC/ETH seulement. None si indispo (carte masquée)."""
+    if currency not in ("BTC", "ETH"):
+        return None
+    try:
+        res = _deribit_get("public/get_book_summary_by_currency",
+                           currency=currency, kind="future")
+        idx = _deribit_get("public/get_index_price",
+                           index_name=f"{currency.lower()}_usd")["index_price"]
+        now = dt.datetime.now(dt.timezone.utc)
+        rows = []
+        for f in res:
+            name = f.get("instrument_name", "")
+            mark = f.get("mark_price")
+            if "PERPETUAL" in name or not mark:
+                continue
+            try:
+                exp = dt.datetime.strptime(name.split("-")[1], "%d%b%y").replace(
+                    hour=8, tzinfo=dt.timezone.utc)
+            except (ValueError, IndexError):
+                continue
+            days = (exp - now).total_seconds() / 86400
+            if days <= 0.5:
+                continue
+            ann = (mark / idx - 1) * 365 / days * 100
+            rows.append({"label": name.split("-")[1], "days": round(days),
+                         "ann_pct": round(ann, 2)})
+        if not rows:
+            return None
+        rows.sort(key=lambda r: r["days"])
+        rows = rows[:4]
+        avg = sum(r["ann_pct"] for r in rows) / len(rows)
+        regime = "contango" if avg > 0.3 else ("backwardation" if avg < -0.3 else "flat")
+        return {"rows": rows, "avg_ann_pct": round(avg, 2), "regime": regime}
+    except Exception:
+        return None
+
+# === Snapshots OI par strike (pour la variation OI 24h) ===========================
+# Une photo par jour de l'open interest agrégé par strike (toutes échéances), 1 fichier
+# par jour et par actif. Idempotent : si la photo du jour existe déjà, on ne réécrit pas.
+# La variation 24h compare le book live au dernier snapshot ANTÉRIEUR à aujourd'hui.
+OI_DIR = os.path.join(HIST_DIR, "oi_snap")
+
+def _oi_by_strike(book):
+    """OI agrégé par strike, séparé call/put : {'C':{strike_str:oi}, 'P':{...}}."""
+    out = {"C": {}, "P": {}}
+    for o in book:
+        cp = o.get("type")
+        if cp not in ("C", "P"):
+            continue
+        k = str(int(round(o["strike"])))
+        out[cp][k] = out[cp].get(k, 0.0) + float(o.get("oi", 0) or 0)
+    return out
+
+def _oi_files(asset):
+    try:
+        return sorted(f for f in os.listdir(OI_DIR)
+                      if f.startswith(asset + "_") and f.endswith(".json"))
+    except OSError:
+        return []
+
+def record_oi_snapshot(asset, book):
+    """Écrit la photo OI du jour (1 fichier/jour/actif, idempotent). Garde les 12 derniers."""
+    try:
+        os.makedirs(OI_DIR, exist_ok=True)
+        date = dt.date.today().isoformat()
+        path = os.path.join(OI_DIR, f"{asset}_{date}.json")
+        if os.path.exists(path):
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(_oi_by_strike(book), f)
+        for old in _oi_files(asset)[:-12]:
+            try:
+                os.remove(os.path.join(OI_DIR, old))
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+def oi_change_24h(asset, book):
+    """Compare l'OI par strike d'aujourd'hui (book live) au dernier snapshot antérieur.
+    Renvoie les plus gros mouvements (build/unwind) + agrégats net call/put.
+    status='collecting' tant qu'aucun snapshot antérieur n'existe."""
+    try:
+        date = dt.date.today().isoformat()
+        files = _oi_files(asset)
+        prior = [f for f in files if f < f"{asset}_{date}.json"]
+        if not prior:
+            return {"status": "collecting", "have": len(files)}
+        prev_path = os.path.join(OI_DIR, prior[-1])
+        prev_date = prior[-1][len(asset) + 1:-5]
+        with open(prev_path, encoding="utf-8") as f:
+            prev = json.load(f)
+        cur = _oi_by_strike(book)
+        rows = []
+        for cp in ("C", "P"):
+            for k in set(cur[cp]) | set(prev.get(cp, {})):
+                d = cur[cp].get(k, 0.0) - prev.get(cp, {}).get(k, 0.0)
+                if abs(d) >= 0.5:
+                    rows.append({"cp": cp, "strike": int(k), "doi": round(d, 1),
+                                 "oi": round(cur[cp].get(k, 0.0), 1)})
+        if not rows:
+            return {"status": "flat", "asof": prev_date}
+        rows.sort(key=lambda r: abs(r["doi"]), reverse=True)
+        net_call = sum(r["doi"] for r in rows if r["cp"] == "C")
+        net_put = sum(r["doi"] for r in rows if r["cp"] == "P")
+        return {"status": "ok", "asof": prev_date, "top": rows[:6],
+                "net_call_doi": round(net_call, 1), "net_put_doi": round(net_put, 1)}
+    except Exception:
+        return None
+
 def fetch_chain(asset):
     """Récupère la chaîne d'options UNE fois (S, book). Permet à daily.py de calculer
     plusieurs horizons sans refetcher le réseau à chaque fois."""
@@ -1106,7 +1414,14 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     # --- Signe dealer : figé (fixed) ou déduit du skew (adaptive). Heuristique, voir en-tête. ---
     # On prend le RR mensuel (skew structurel, moins bruité que le court terme) comme orientation.
     rr_for_sign = risk_reversal(book, 30)
-    sc, sp, sign_info = dealer_signs(rr_for_sign, mode=sign_mode)   # sign_mode=None -> réglage global
+    # MACRO (indices/ETF) : convention FIXE verrouillée — c'est le standard du marché actions
+    # (flux structurels : fonds vendeurs de calls couverts + acheteurs de puts de protection).
+    # L'adaptatif (heuristique skew) n'a de sens potentiel que sur crypto.
+    eff_sign_mode = "fixed" if not crypto else sign_mode
+    sc, sp, sign_info = dealer_signs(rr_for_sign, mode=eff_sign_mode)
+    if not crypto:
+        sign_info["locked"] = True
+        sign_info["reason"] = "convention fixe verrouillée (standard indices : puts de couverture + calls couverts)"
     signs = (sc, sp)
 
     gex_total, gex_strikes = gamma_exposure(book_dte, S, csize, signs=signs)
@@ -1148,7 +1463,7 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
         "rr_monthly": risk_reversal(book, 30),
         "rr_near_days": max(1, round(eff_dte)),
         "skew_term": skew_term,
-        "charm_vanna_opex": charm_vanna_opex(book, S, csize, signs=signs),
+        "charm_vanna_opex": charm_vanna_opex(book, S, csize, signs=signs, r=(0.0 if crypto else MACRO_RISK_FREE)),
         "vol_trigger_regime": ("range" if (flip and S >= flip) else "breakout" if flip else None),
         "term_regime": detect_term_regime(curve),
         "iv_percentile": ivp, "iv_history_points": n,
@@ -1198,7 +1513,7 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     metrics["history"] = metrics["histories"].get(hz, [])
 
     # --- Forecast dealer (charm/vanna) + matrice de scénarios : calculés sur le book ---
-    charm_d, vanna_1 = charm_vanna_flow(book_dte, S, csize, signs=signs)
+    charm_d, vanna_1 = charm_vanna_flow(book_dte, S, csize, signs=signs, r=(0.0 if crypto else MACRO_RISK_FREE))
     metrics["charm_musd"] = round(charm_d / 1e6, 1)
     metrics["vanna_musd"] = round(vanna_1 / 1e6, 1)
     metrics["scenario_matrix"] = scenario_matrix(book_dte, S, csize, signs=signs)
@@ -1221,11 +1536,34 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     # --- Champs nécessitant une source externe non branchée : explicitement None ---
     # Le dashboard affiche "DONNÉE MANQUANTE" pour chacun.
     metrics["funding"] = (deribit_funding(asset) if cfg["source"] == "deribit" else None)
+    metrics["funding_multi"] = (funding_multi(asset, metrics["funding"]) if cfg["source"] == "deribit" else None)
     metrics["coinbase_premium"] = (coinbase_premium(asset, S) if cfg["source"] == "deribit" else None)
     metrics["stablecoins"] = (stablecoins() if cfg["source"] == "deribit" else None)
     metrics["block_trades"] = (block_trades(asset, S) if cfg["source"] == "deribit" else None)
+    record_oi_snapshot(asset, book)                 # photo OI du jour (collecte)
+    metrics["oi_change_24h"] = oi_change_24h(asset, book)
+    # Book TOTAL (toutes échéances) : la métrique comparable aux sites publics
+    gex_book_tot, _ = gamma_exposure(book, S, csize, signs=signs)
+    dex_book_tot = delta_exposure(book, S, csize)
+    bt_dex = round(dex_book_tot / 1e6, 1)
+    bt_gex = round(gex_book_tot / 1e6, 1)
+    record_total_history(asset, bt_dex, bt_gex, round(S, 2))
+    metrics["book_total"] = {"dex_musd": bt_dex, "gex_musd": bt_gex,
+                             "n_options": len(book),
+                             "history": read_total_history(asset)}
+    metrics["histories"]["total"] = metrics["book_total"]["history"]
+    # VEX + theta dealers (même tranche DTE que charm/vanna pour cohérence de la carte)
+    vex_1pt, theta_daily = vega_theta_exposure(book_dte, S, csize, signs=signs, r=(0.0 if crypto else MACRO_RISK_FREE))
+    metrics["vex_musd"] = round(vex_1pt / 1e6, 1)
+    metrics["theta_musd"] = round(theta_daily / 1e6, 1)
+    # Calendrier des échéances : book COMPLET (le but est de voir tout ce qui expire)
+    metrics["expiry_calendar"] = expiry_calendar(book, S, csize)
+    # IV Rank : réutilise l'historique d'iv_percentile (aucune collecte séparée)
+    metrics["iv_rank"] = iv_rank(asset, metrics.get("iv30"))
+    # Basis futures datés (contango/backwardation) — crypto inverse seulement
+    metrics["futures_basis"] = (futures_basis(asset) if cfg["source"] == "deribit" else None)
     metrics["oi_by_exchange"] = None      # OI Binance/Bybit/OKX -> autre source
-    metrics["oi_change_24h"] = None       # variation OI 24h -> 2+ jours de snapshots
+    metrics["is_crypto"] = crypto         # pilote l'affichage des cartes crypto-only côté UI
     metrics["stablecoin_supply"] = None   # supply USDT/USDC -> source on-chain
     return metrics
 

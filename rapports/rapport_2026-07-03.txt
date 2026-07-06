@@ -1,0 +1,80 @@
+RAPPORT FLOW ENGINE — 2026-07-03  [moteur 2026-07-02-k]
+====================================================================
+
+CONTEXTE : RISK-ON  (vote +2 sur 4)
+  SPX 5j +1.59% · BTC 5j +4.80% · $ proxy 5j -0.63% · Or 5j +2.21%
+  Corrélation BTC/SPX : -0.66 sur 5j  (fiabilité limitée <15j)
+
+VERDICTS (horizon mensuel) :
+  BTC   BAISSIER  MODÉRÉE  score  -5.8 | GEX total 59.6M$ | spot 62,559.37 | max pain 62000.0
+  ETH   BAISSIER  MODÉRÉE  score  -8.0 | GEX total 4.9M$ | spot 1,749.44 | max pain 1700.0
+  SPY   NEUTRE    NEUTRE   score  -3.6 | GEX total -2142.3M$ | spot 744.78 | max pain 743.0
+  QQQ   BAISSIER  FAIBLE   score  -4.0 | GEX total -2242.7M$ | spot 714.22 | max pain 716.0
+  GC    NEUTRE    NEUTRE   score  -1.8 | GEX total -237.3M$ | spot 378.13 | max pain 390.0
+  — autres actifs avec signal :
+  SOL   BAISSIER  MODÉRÉE  score  -5.9
+  AVAX  BAISSIER  MODÉRÉE  score  -7.0
+  HYPE  BAISSIER  MODÉRÉE  score  -6.0
+  SPX   BAISSIER  MODÉRÉE  score  -5.6
+  DJX   BAISSIER  MODÉRÉE  score  -8.0
+  DIA   BAISSIER  MODÉRÉE  score  -5.3
+  XLF   BAISSIER  MODÉRÉE  score  -5.8
+  UUP   HAUSSIER  MODÉRÉE  score  +8.0
+
+ALERTES :
+  ⚠ BTC: poche de liquidations shorts ~297.4M$ à $63,871 (2.0% du spot)
+  ⚠ BTC: OI calls en fort mouvement (+12318 / +10320 contrats vs 2026-07-02)
+  ⚠ ETH: poche de liquidations shorts ~62.7M$ à $1,804 (3.0% du spot)
+  ⚠ ETH: OI calls en fort mouvement (+48306 / +28467 contrats vs 2026-07-02)
+  ⚠ SOL: 47.4% du gamma expire dans 7j (2026-07-10) -> régime instable après cette date
+  ⚠ SOL: poche de liquidations shorts ~45.4M$ à $85 (2.9% du spot)
+  ⚠ SOL: OI calls en fort mouvement (+19090 / +6860 contrats vs 2026-07-02)
+  ⚠ XRP: OI calls en fort mouvement (+1034000 / +441000 contrats vs 2026-07-02)
+  ⚠ AVAX: OI calls en fort mouvement (+8700 / +1200 contrats vs 2026-07-02)
+  ⚠ TRX: 40.9% du gamma expire dans 7j (2026-07-10) -> régime instable après cette date
+  ⚠ TRX: spot à 0.4% du gamma flip -> zone de bascule de régime
+  ⚠ TRX: OI calls en fort mouvement (+1310000 / +920000 contrats vs 2026-07-02)
+  ⚠ HYPE: 25.9% du gamma expire dans 2j (2026-07-05) -> régime instable après cette date
+  ⚠ HYPE: poche de liquidations shorts ~57.3M$ à $72 (2.2% du spot)
+  ⚠ HYPE: funding +30% annualisé -> levier déséquilibré, reversal possible
+  ⚠ HYPE: OI puts en fort mouvement (+28750 / +33210 contrats vs 2026-07-02)
+  ⚠ SPX: spot à 0.0% du gamma flip -> zone de bascule de régime
+  ⚠ SPX: OI puts en fort mouvement (+20502 / +414610 contrats vs 2026-07-02)
+  ⚠ NDX: 25.7% du gamma expire dans 3j (2026-07-06) -> régime instable après cette date
+  ⚠ NDX: spot à 0.3% du gamma flip -> zone de bascule de régime
+  ⚠ NDX: OI puts en fort mouvement (+6562 / +9902 contrats vs 2026-07-02)
+  ⚠ RUT: OI calls en fort mouvement (-14689 / -4709 contrats vs 2026-07-02)
+  ⚠ VIX: OI calls en fort mouvement (-294701 / +21107 contrats vs 2026-07-02)
+  ⚠ SPY: spot à 0.3% du gamma flip -> zone de bascule de régime
+  ⚠ SPY: OI puts en fort mouvement (+347423 / +460442 contrats vs 2026-07-02)
+  ⚠ QQQ: OI puts en fort mouvement (+221910 / +266979 contrats vs 2026-07-02)
+  ⚠ IWM: OI puts en fort mouvement (+93450 / +164439 contrats vs 2026-07-02)
+  ⚠ DIA: OI calls en fort mouvement (+12352 / +11985 contrats vs 2026-07-02)
+  ⚠ XLF: OI calls en fort mouvement (+75888 / +24408 contrats vs 2026-07-02)
+  ⚠ XLE: spot à 0.5% du gamma flip -> zone de bascule de régime
+  ⚠ XLE: OI calls en fort mouvement (+80786 / +47650 contrats vs 2026-07-02)
+  ⚠ XLK: spot à 0.7% du gamma flip -> zone de bascule de régime
+  ⚠ XLK: OI puts en fort mouvement (+9310 / +12703 contrats vs 2026-07-02)
+  ⚠ SMH: OI puts en fort mouvement (+21592 / +61218 contrats vs 2026-07-02)
+  ⚠ GC: OI calls en fort mouvement (+30732 / +13296 contrats vs 2026-07-02)
+  ⚠ SLV: spot à 0.2% du gamma flip -> zone de bascule de régime
+  ⚠ SLV: OI calls en fort mouvement (+55005 / +9909 contrats vs 2026-07-02)
+  ⚠ CL: OI calls en fort mouvement (+10288 / +298 contrats vs 2026-07-02)
+  ⚠ UNG: OI calls en fort mouvement (+5518 / -1471 contrats vs 2026-07-02)
+  ⚠ UUP: spot à 0.7% du gamma flip -> zone de bascule de régime
+  ⚠ JP 6J: OI calls en fort mouvement (+7093 / +66 contrats vs 2026-07-02)
+  ⚠ TLT: spot à 0.4% du gamma flip -> zone de bascule de régime
+  ⚠ TLT: OI calls en fort mouvement (+136083 / +36701 contrats vs 2026-07-02)
+  ⚠ HYG: spot à 0.5% du gamma flip -> zone de bascule de régime
+  ⚠ HYG: OI puts en fort mouvement (+18 / +101718 contrats vs 2026-07-02)
+
+SANTÉ DES COLLECTEURS :
+  [OK ] Historique quotidien (daily.py)        2026-07-03 (aujourd'hui)
+  [OK ] Photos OI par strike                   2026-07-03 (aujourd'hui)
+  [OK ] Tape (signe empirique)                 2026-07-03 (aujourd'hui)
+  [OK ] IV quotidienne (rank/percentile)       2026-07-03 (aujourd'hui)
+  [OK ] Book total (courbe)                    2026-07-03 (aujourd'hui)
+  [OK ] Snapshots JSON (archive)               2026-07-03 (aujourd'hui)
+
+====================================================================
+Rappel : outil d'aide à la lecture du positionnement, pas un signal de trading.

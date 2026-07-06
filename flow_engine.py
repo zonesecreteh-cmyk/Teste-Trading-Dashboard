@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-07-02-f"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-07-02-k"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer ---------------------------------------------
 # IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
@@ -1299,6 +1299,284 @@ def futures_basis(currency):
     except Exception:
         return None
 
+# === Heatmap liquidations (Hyperliquid, ESTIMATION) ================================
+# Méthode standard des heatmaps publiques (Coinglass-like) : le volume de chaque bougie
+# 1h (7 jours) est supposé ouvrir des positions à paliers de levier typiques ; on en
+# déduit les niveaux de liquidation, et on RETIRE ceux que le prix a déjà balayés.
+# C'est une ESTIMATION de la densité de levier, pas une mesure de positions réelles.
+_HL_CACHE = {}
+_HL_LEVERAGE = {5: 0.15, 10: 0.30, 25: 0.30, 50: 0.20, 100: 0.05}   # distribution supposée
+
+def hyperliquid_liq_map(coin, band=0.25, bucket_pct=0.01):
+    """Zones estimées de liquidations longs (sous le spot) et shorts (au-dessus).
+    Cache 5 min. None si Hyperliquid indispo ou coin absent (carte masquée)."""
+    import time as _t
+    now = _t.time()
+    c = _HL_CACHE.get(coin)
+    if c and now - c[0] < 300:
+        return c[1]
+    try:
+        import time as _t2
+        end = int(_t2.time() * 1000)
+        start = end - 7 * 24 * 3600 * 1000
+        r = requests.post("https://api.hyperliquid.xyz/info",
+                          json={"type": "candleSnapshot",
+                                "req": {"coin": coin, "interval": "1h",
+                                        "startTime": start, "endTime": end}},
+                          timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None
+        candles = r.json()
+        if not isinstance(candles, list) or len(candles) < 24:
+            return None
+        n = len(candles)
+        closes = [float(cd["c"]) for cd in candles]
+        lows = [float(cd["l"]) for cd in candles]
+        highs = [float(cd["h"]) for cd in candles]
+        vols = [float(cd["v"]) for cd in candles]
+        spot = closes[-1]
+        # suffixes : extrêmes atteints APRÈS chaque bougie (pour retirer les niveaux balayés)
+        smin = [0.0] * n
+        smax = [0.0] * n
+        cur_min, cur_max = float("inf"), 0.0
+        for i in range(n - 1, -1, -1):
+            smin[i], smax[i] = cur_min, cur_max
+            cur_min = min(cur_min, lows[i])
+            cur_max = max(cur_max, highs[i])
+        lo_b, hi_b = spot * (1 - band), spot * (1 + band)
+        step = spot * bucket_pct
+        buckets = {}
+        for i in range(n):
+            notional = vols[i] * closes[i]
+            if notional <= 0:
+                continue
+            age_w = 0.5 + 0.5 * (i + 1) / n           # les bougies récentes pèsent plus
+            for lev, w in _HL_LEVERAGE.items():
+                amt = notional * w * age_w * 0.5       # moitié longs, moitié shorts
+                liq_l = closes[i] * (1 - 1.0 / lev)    # liquidation des longs (dessous)
+                if lo_b <= liq_l < spot and not (smin[i] <= liq_l):
+                    k = round(liq_l / step)
+                    b = buckets.setdefault(k, [0.0, 0.0])
+                    b[0] += amt
+                liq_s = closes[i] * (1 + 1.0 / lev)    # liquidation des shorts (dessus)
+                if spot < liq_s <= hi_b and not (smax[i] >= liq_s):
+                    k = round(liq_s / step)
+                    b = buckets.setdefault(k, [0.0, 0.0])
+                    b[1] += amt
+        below, above = [], []
+        for k, (l_amt, s_amt) in buckets.items():
+            price = k * step
+            if l_amt > 0 and price < spot:
+                below.append({"price": round(price), "musd": round(l_amt / 1e6, 1)})
+            if s_amt > 0 and price > spot:
+                above.append({"price": round(price), "musd": round(s_amt / 1e6, 1)})
+        below.sort(key=lambda b: b["musd"], reverse=True)
+        above.sort(key=lambda b: b["musd"], reverse=True)
+        below, above = below[:6], above[:6]
+        below.sort(key=lambda b: b["price"], reverse=True)
+        above.sort(key=lambda b: b["price"], reverse=True)
+        out = {"spot": round(spot, 2),
+               "above": above, "below": below,
+               "total_above_musd": round(sum(b["musd"] for b in above), 1),
+               "total_below_musd": round(sum(b["musd"] for b in below), 1)}
+        _HL_CACHE[coin] = (now, out)
+        return out
+    except Exception:
+        return None
+
+# === Contexte macro : corrélation BTC/SPX, proxy dollar, régime risk-on/off =======
+# ZÉRO nouvelle source : tout vient des historiques quotidiens déjà collectés.
+# Proxy dollar = -(0.81×FXE + 0.19×FXY) : EUR (57.6%) + JPY (13.6%) pèsent ~71% du
+# DXY ; on renormalise leurs poids. Un vrai DXY exigerait une source dédiée.
+def _spot_series(asset):
+    try:
+        return [(r["date"], r["spot"]) for r in _read_history_file(asset, "mensuel")
+                if r.get("spot")]
+    except Exception:
+        return []
+
+def _ret_pct(series, lag):
+    if len(series) < lag + 1:
+        return None
+    a, b = series[-1][1], series[-1 - lag][1]
+    return round((a / b - 1) * 100, 2) if b else None
+
+def macro_context():
+    """Situe le crypto dans le marché global. Fiable à mesure que l'historique grandit."""
+    try:
+        btc, spy, gld = _spot_series("BTC"), _spot_series("SPY"), _spot_series("GC")
+        fxe, fxy = _spot_series("EU 6E"), _spot_series("JP 6J")
+        # --- corrélation BTC/SPX sur rendements quotidiens (dates communes, fenêtre 30) ---
+        db, ds = dict(btc), dict(spy)
+        common = sorted(set(db) & set(ds))
+        rb, rs = [], []
+        for i in range(1, len(common)):
+            b0, s0 = db[common[i - 1]], ds[common[i - 1]]
+            if b0 and s0:
+                rb.append(db[common[i]] / b0 - 1)
+                rs.append(ds[common[i]] / s0 - 1)
+        corr = None
+        if len(rb) >= 5:
+            c = np.corrcoef(rb[-30:], rs[-30:])[0, 1]
+            corr = round(float(c), 2) if np.isfinite(c) else None
+        # --- variations 5 jours (points d'historique, ~1 semaine de bourse) ---
+        spy5, btc5, gld5 = _ret_pct(spy, 5), _ret_pct(btc, 5), _ret_pct(gld, 5)
+        f5, y5 = _ret_pct(fxe, 5), _ret_pct(fxy, 5)
+        dxy5 = (round(-(0.81 * f5 + 0.19 * y5), 2) if (f5 is not None and y5 is not None)
+                else (round(-f5, 2) if f5 is not None else None))
+        # --- vote risk-on/off : actions+, crypto+, dollar-, or- = appétit pour le risque ---
+        votes = n_sig = 0
+        for v, risk_on_when_up in [(spy5, True), (btc5, True), (dxy5, False), (gld5, False)]:
+            if v is None:
+                continue
+            n_sig += 1
+            if abs(v) >= 0.15:                    # variation significative seulement
+                votes += 1 if (v > 0) == risk_on_when_up else -1
+        if n_sig < 3:
+            regime = "COLLECTE"
+        elif votes >= 2:
+            regime = "RISK-ON"
+        elif votes <= -2:
+            regime = "RISK-OFF"
+        else:
+            regime = "MIXTE"
+        return {"corr_btc_spx": corr, "corr_n": len(rb), "spy_5d": spy5, "btc_5d": btc5,
+                "gld_5d": gld5, "dxy_5d": dxy5, "regime": regime, "votes": votes,
+                "n_signals": n_sig}
+    except Exception:
+        return None
+
+# === Santé des collecteurs =========================================================
+# Les pros surveillent leurs pipelines : un collecteur qui s'arrête en silence
+# (PC éteint, tâche Windows en panne) fausse tout sans prévenir. Sentinelle = BTC
+# (coté 7/7). Statut par âge de la dernière écriture : ok ≤1j · warn 2-3j · late >3j.
+def _last_csv_date(path):
+    try:
+        last = None
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                d = line.split(",", 1)[0].strip()
+                if len(d) == 10:
+                    last = d
+        return last
+    except OSError:
+        return None
+
+def _last_snap_date(directory, asset):
+    try:
+        files = sorted(f for f in os.listdir(directory)
+                       if f.startswith(asset + "_") and f.endswith(".json"))
+        return files[-1][len(asset) + 1:-5] if files else None
+    except OSError:
+        return None
+
+def data_health(sentinel="BTC"):
+    snap_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+    flux = [
+        ("Historique quotidien (daily.py)", _last_csv_date(os.path.join(HIST_DIR, f"{sentinel}_mensuel_dexgex.csv"))),
+        ("Photos OI par strike",            _last_snap_date(OI_DIR, sentinel)),
+        ("Tape (signe empirique)",          _last_snap_date(TAPE_DIR, sentinel)),
+        ("IV quotidienne (rank/percentile)", _last_csv_date(os.path.join(HIST_DIR, f"{sentinel}.csv"))),
+        ("Book total (courbe)",             _last_csv_date(_total_hist_path(sentinel))),
+        ("Snapshots JSON (archive)",        _last_snap_date(snap_dir, sentinel)),
+    ]
+    today = dt.date.today()
+    rows = []
+    worst = "ok"
+    rank = {"ok": 0, "warn": 1, "late": 2, "never": 3}
+    for name, last in flux:
+        if last is None:
+            st, age = "never", None
+        else:
+            try:
+                age = (today - dt.date.fromisoformat(last)).days
+            except ValueError:
+                age = None
+            st = "never" if age is None else ("ok" if age <= 1 else "warn" if age <= 3 else "late")
+        rows.append({"flux": name, "last": last, "age_days": age, "status": st})
+        if rank[st] > rank[worst]:
+            worst = st
+    return {"rows": rows, "worst": worst, "sentinel": sentinel}
+
+# === Tape Deribit : flux client signé -> signe dealer EMPIRIQUE ===================
+# La méthode pro : au lieu de SUPPOSER l'inventaire dealer (fixe) ou de le deviner via
+# le skew (adaptatif), on le MESURE. Chaque trade Deribit porte le côté agresseur
+# (taker) : si les clients achètent net des calls, les dealers sont short calls, etc.
+# 1 photo/jour (idempotente) du flux client 24h par type ; cumul sur 14 jours.
+TAPE_DIR = os.path.join(HIST_DIR, "tape_snap")
+TAPE_MIN_DAYS = 3          # jours de tape minimum avant de faire confiance au signe
+TAPE_MIN_MUSD = 5.0        # notionnel net minimal (M$) pour considérer un côté significatif
+
+def _tape_files(asset):
+    try:
+        return sorted(f for f in os.listdir(TAPE_DIR)
+                      if f.startswith(asset + "_") and f.endswith(".json"))
+    except OSError:
+        return []
+
+def record_tape_snapshot(asset, ref_price):
+    """Photo du flux client 24h : notionnel signé (achat +, vente -) agrégé par type C/P.
+    BTC/ETH seulement (tape liquide). Idempotent, garde 14 fichiers."""
+    if asset not in ("BTC", "ETH"):
+        return
+    try:
+        os.makedirs(TAPE_DIR, exist_ok=True)
+        date = dt.date.today().isoformat()
+        path = os.path.join(TAPE_DIR, f"{asset}_{date}.json")
+        if os.path.exists(path):
+            return
+        import time as _t
+        cutoff = int(_t.time() * 1000) - 24 * 3600 * 1000
+        res = _deribit_get("public/get_last_trades_by_currency",
+                           currency=asset, kind="option", count=1000)
+        flow = {"C": 0.0, "P": 0.0, "n": 0}
+        for t in res.get("trades", []):
+            if (t.get("timestamp") or 0) < cutoff:
+                continue
+            parts = t.get("instrument_name", "").split("-")
+            if len(parts) != 4:
+                continue
+            cp = parts[3].upper()
+            if cp not in ("C", "P"):
+                continue
+            ipx = t.get("index_price") or ref_price or 0
+            notional = (t.get("amount") or 0) * ipx
+            flow[cp] += notional if t.get("direction") == "buy" else -notional
+            flow["n"] += 1
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(flow, f)
+        for old in _tape_files(asset)[:-14]:
+            try:
+                os.remove(os.path.join(TAPE_DIR, old))
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+def empirical_signs(asset):
+    """Signes dealers déduits du tape cumulé : dealer = opposé du flux client net.
+    Renvoie {status:'ok', sc, sp, ...} ou {status:'collecting', have} ou None."""
+    if asset not in ("BTC", "ETH"):
+        return None
+    try:
+        files = _tape_files(asset)
+        if len(files) < TAPE_MIN_DAYS:
+            return {"status": "collecting", "have": len(files), "need": TAPE_MIN_DAYS}
+        net_c = net_p = 0.0
+        for fn in files:
+            with open(os.path.join(TAPE_DIR, fn), encoding="utf-8") as f:
+                d = json.load(f)
+            net_c += d.get("C", 0.0)
+            net_p += d.get("P", 0.0)
+        nc_m, np_m = net_c / 1e6, net_p / 1e6
+        # côté non significatif (< TAPE_MIN_MUSD) -> on garde la convention fixe pour ce côté
+        sc = (-1 if nc_m > 0 else 1) if abs(nc_m) >= TAPE_MIN_MUSD else SIGN_CALL
+        sp = (-1 if np_m > 0 else 1) if abs(np_m) >= TAPE_MIN_MUSD else SIGN_PUT
+        return {"status": "ok", "sc": sc, "sp": sp, "days": len(files),
+                "net_call_musd": round(nc_m, 1), "net_put_musd": round(np_m, 1)}
+    except Exception:
+        return None
+
 # === Snapshots OI par strike (pour la variation OI 24h) ===========================
 # Une photo par jour de l'open interest agrégé par strike (toutes échéances), 1 fichier
 # par jour et par actif. Idempotent : si la photo du jour existe déjà, on ne réécrit pas.
@@ -1356,6 +1634,7 @@ def oi_change_24h(asset, book):
         with open(prev_path, encoding="utf-8") as f:
             prev = json.load(f)
         cur = _oi_by_strike(book)
+        gap = max(1, (dt.date.today() - dt.date.fromisoformat(prev_date)).days)
         rows = []
         for cp in ("C", "P"):
             for k in set(cur[cp]) | set(prev.get(cp, {})):
@@ -1364,11 +1643,11 @@ def oi_change_24h(asset, book):
                     rows.append({"cp": cp, "strike": int(k), "doi": round(d, 1),
                                  "oi": round(cur[cp].get(k, 0.0), 1)})
         if not rows:
-            return {"status": "flat", "asof": prev_date}
+            return {"status": "flat", "asof": prev_date, "gap_days": gap}
         rows.sort(key=lambda r: abs(r["doi"]), reverse=True)
         net_call = sum(r["doi"] for r in rows if r["cp"] == "C")
         net_put = sum(r["doi"] for r in rows if r["cp"] == "P")
-        return {"status": "ok", "asof": prev_date, "top": rows[:6],
+        return {"status": "ok", "asof": prev_date, "gap_days": gap, "top": rows[:6],
                 "net_call_doi": round(net_call, 1), "net_put_doi": round(net_put, 1)}
     except Exception:
         return None
@@ -1414,14 +1693,39 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     # --- Signe dealer : figé (fixed) ou déduit du skew (adaptive). Heuristique, voir en-tête. ---
     # On prend le RR mensuel (skew structurel, moins bruité que le court terme) comme orientation.
     rr_for_sign = risk_reversal(book, 30)
-    # MACRO (indices/ETF) : convention FIXE verrouillée — c'est le standard du marché actions
-    # (flux structurels : fonds vendeurs de calls couverts + acheteurs de puts de protection).
-    # L'adaptatif (heuristique skew) n'a de sens potentiel que sur crypto.
-    eff_sign_mode = "fixed" if not crypto else sign_mode
-    sc, sp, sign_info = dealer_signs(rr_for_sign, mode=eff_sign_mode)
+    # Sélection AUTOMATIQUE du signe dealer — plus de choix manuel dans l'UI :
+    #   macro          -> FIXE (standard indices : puts de couverture + calls couverts)
+    #   BTC/ETH        -> EMPIRIQUE (mesuré sur le tape) dès TAPE_MIN_DAYS jours, sinon fixe
+    #   altcoins       -> FIXE (pas de tape exploitable)
+    # L'adaptatif n'est plus exposé, mais reste calculé et ENREGISTRÉ chaque jour dans
+    # l'historique (colonnes dédiées) : le backtest tranchera fixe vs adaptatif plus tard.
+    # Le paramètre sign_mode est conservé pour compat mais ignoré.
     if not crypto:
+        sc, sp, sign_info = dealer_signs(rr_for_sign, mode="fixed")
         sign_info["locked"] = True
         sign_info["reason"] = "convention fixe verrouillée (standard indices : puts de couverture + calls couverts)"
+    else:
+        emp = empirical_signs(asset)
+        if emp and emp.get("status") == "ok":
+            sc, sp = emp["sc"], emp["sp"]
+            sign_info = {"mode": "empirical", "rr": rr_for_sign,
+                         "flipped": (sc, sp) != (SIGN_CALL, SIGN_PUT),
+                         "tape_days": emp["days"],
+                         "reason": f"mesuré sur {emp['days']}j de tape : clients "
+                                   f"{'achètent' if emp['net_call_musd'] > 0 else 'vendent'} les calls net "
+                                   f"({emp['net_call_musd']:+}M$), "
+                                   f"{'achètent' if emp['net_put_musd'] > 0 else 'vendent'} les puts net "
+                                   f"({emp['net_put_musd']:+}M$)"}
+        else:
+            sc, sp, sign_info = dealer_signs(rr_for_sign, mode="fixed")
+            if asset in ("BTC", "ETH"):
+                have = emp.get("have", 0) if emp else 0
+                need = emp.get("need", TAPE_MIN_DAYS) if emp else TAPE_MIN_DAYS
+                sign_info["pending_tape"] = f"{have}/{need}"
+                sign_info["reason"] = (f"fixe en attendant le tape ({have}/{need}j de collecte) — "
+                                       f"bascule empirique automatique ensuite")
+            else:
+                sign_info["reason"] = "convention fixe (pas de tape exploitable sur cet actif)"
     signs = (sc, sp)
 
     gex_total, gex_strikes = gamma_exposure(book_dte, S, csize, signs=signs)
@@ -1542,6 +1846,11 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     metrics["block_trades"] = (block_trades(asset, S) if cfg["source"] == "deribit" else None)
     record_oi_snapshot(asset, book)                 # photo OI du jour (collecte)
     metrics["oi_change_24h"] = oi_change_24h(asset, book)
+    record_tape_snapshot(asset, S)                  # photo tape du jour (collecte, BTC/ETH)
+    metrics["tape_signs"] = empirical_signs(asset)  # état du signe empirique (affichage)
+    metrics["macro_context"] = macro_context()      # contexte global (mêmes données pour tous)
+    metrics["liq_map"] = (hyperliquid_liq_map(asset) if cfg["source"] == "deribit" else None)
+    metrics["data_health"] = data_health()
     # Book TOTAL (toutes échéances) : la métrique comparable aux sites publics
     gex_book_tot, _ = gamma_exposure(book, S, csize, signs=signs)
     dex_book_tot = delta_exposure(book, S, csize)

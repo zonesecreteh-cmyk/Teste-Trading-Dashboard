@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-07-02-k"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-08-08-a"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer ---------------------------------------------
 # IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
@@ -765,10 +765,8 @@ def block_trades(currency, ref_price, min_notional=1_000_000):
     try:
         import time as _t
         cutoff = int(_t.time() * 1000) - 24 * 3600 * 1000
-        res = _deribit_get("public/get_last_trades_by_currency",
-                           currency=currency, kind="option", count=1000)
         blocks = []
-        for t in res.get("trades", []):
+        for t in _recent_option_trades(currency):
             if (t.get("timestamp") or 0) < cutoff:
                 continue
             parts = t.get("instrument_name", "").split("-")
@@ -1384,6 +1382,95 @@ def hyperliquid_liq_map(coin, band=0.25, bucket_pct=0.01):
     except Exception:
         return None
 
+_TRADES_CACHE = {}
+
+def _recent_option_trades(currency, count=1000):
+    """Derniers trades d'options (cache 5 min, partagé par les analyses de flux)."""
+    import time as _t
+    now = _t.time()
+    c = _TRADES_CACHE.get(currency)
+    if c and now - c[0] < 300:
+        return c[1]
+    res = _deribit_get("public/get_last_trades_by_currency",
+                       currency=currency, kind="option", count=count)
+    trades = res.get("trades", [])
+    _TRADES_CACHE[currency] = (now, trades)
+    return trades
+
+def flow_summary(asset, ref_price):
+    """QUI achète QUOI, à quel prix, et sens de la volatilité — sur 24h de tape.
+    Le côté 'direction' de Deribit est celui du TAKER (l'agresseur) = le client.
+    Le dealer prend systématiquement l'autre côté. BTC/ETH seulement."""
+    if asset not in ("BTC", "ETH") or not ref_price:
+        return None
+    try:
+        import time as _t
+        cutoff = int(_t.time() * 1000) - 24 * 3600 * 1000
+        net_c = net_p = 0.0
+        buy_prem = sell_prem = 0.0
+        n = 0
+        by_strike = {}
+        for t in _recent_option_trades(asset):
+            if (t.get("timestamp") or 0) < cutoff:
+                continue
+            parts = t.get("instrument_name", "").split("-")
+            if len(parts) != 4:
+                continue
+            cp = parts[3].upper()
+            if cp not in ("C", "P"):
+                continue
+            try:
+                strike = float(parts[2].replace("d", "."))
+            except ValueError:
+                continue
+            ipx = t.get("index_price") or ref_price
+            amount = t.get("amount") or 0
+            notional = amount * ipx
+            is_buy = t.get("direction") == "buy"
+            signed = notional if is_buy else -notional
+            # prime payée/reçue (proxy du vega échangé : acheter une option = acheter de la vol)
+            prem = (t.get("price") or 0) * amount * ipx
+            if is_buy:
+                buy_prem += prem
+            else:
+                sell_prem += prem
+            if cp == "C":
+                net_c += signed
+            else:
+                net_p += signed
+            k = (cp, round(strike))
+            by_strike[k] = by_strike.get(k, 0.0) + signed
+            n += 1
+        if n == 0:
+            return None
+        net_tot = net_c + net_p
+        net_vol = buy_prem - sell_prem          # >0 : clients paient de la prime = long vol
+        tot_prem = buy_prem + sell_prem
+        vol_pct = round(100 * net_vol / tot_prem, 1) if tot_prem > 0 else 0.0
+        top = sorted(by_strike.items(), key=lambda kv: abs(kv[1]), reverse=True)[:5]
+        thr = 0.02 * max(abs(net_c) + abs(net_p), 1)
+        def stance(v):
+            return "acheteurs" if v > thr else ("vendeurs" if v < -thr else "équilibrés")
+        return {
+            "n_trades": n,
+            "net_musd": round(net_tot / 1e6, 1),
+            "net_call_musd": round(net_c / 1e6, 1),
+            "net_put_musd": round(net_p / 1e6, 1),
+            "clients_options": stance(net_tot),
+            "clients_calls": stance(net_c),
+            "clients_puts": stance(net_p),
+            "dealers_options": ("vendeurs" if net_tot > thr else
+                                "acheteurs" if net_tot < -thr else "équilibrés"),
+            "vol_net_musd": round(net_vol / 1e6, 2),
+            "vol_pct": vol_pct,
+            "vol_stance": ("acheteurs de volatilité" if vol_pct > 5 else
+                           "vendeurs de volatilité" if vol_pct < -5 else
+                           "neutres sur la volatilité"),
+            "top": [{"cp": k[0], "strike": k[1], "net_musd": round(v / 1e6, 1)} for k, v in top],
+        }
+    except Exception:
+        return None
+
 # === Contexte macro : corrélation BTC/SPX, proxy dollar, régime risk-on/off =======
 # ZÉRO nouvelle source : tout vient des historiques quotidiens déjà collectés.
 # Proxy dollar = -(0.81×FXE + 0.19×FXY) : EUR (57.6%) + JPY (13.6%) pèsent ~71% du
@@ -1443,6 +1530,122 @@ def macro_context():
         return {"corr_btc_spx": corr, "corr_n": len(rb), "spy_5d": spy5, "btc_5d": btc5,
                 "gld_5d": gld5, "dxy_5d": dxy5, "regime": regime, "votes": votes,
                 "n_signals": n_sig}
+    except Exception:
+        return None
+
+# === Volume : options (flux d'attention) + sous-jacent (crédibilité du move) ======
+# Volume d'options : déjà dans le book (Deribit 24h / CBOE séance) -> aucun fetch.
+#   Stocké 1 ligne/jour pour comparer le jour à sa moyenne (activité anormale ?).
+# Volume du sous-jacent : Hyperliquid (crypto, bougies 1h) / Stooq (macro, CSV daily
+#   gratuit sans clé). Un mouvement de prix sans volume est moins crédible.
+def _volu_path(asset):
+    return os.path.join(HIST_DIR, f"{asset}_volume.csv")
+
+def record_option_volume(asset, call_v, put_v):
+    try:
+        os.makedirs(HIST_DIR, exist_ok=True)
+        date = dt.date.today().isoformat()
+        path = _volu_path(asset)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                if any(line.startswith(date + ",") for line in f):
+                    return
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{date},{round(call_v, 1)},{round(put_v, 1)}\n")
+    except Exception:
+        pass
+
+def option_volume(asset, book):
+    """Volume d'options du jour + comparaison à la moyenne des jours précédents."""
+    try:
+        call_v = sum(o.get("volume", 0) or 0 for o in book if o["type"] == "C")
+        put_v = sum(o.get("volume", 0) or 0 for o in book if o["type"] == "P")
+        total = call_v + put_v
+        record_option_volume(asset, call_v, put_v)
+        hist = []
+        today = dt.date.today().isoformat()
+        try:
+            with open(_volu_path(asset), encoding="utf-8") as f:
+                for line in f:
+                    p = line.strip().split(",")
+                    if len(p) >= 3 and p[0] != today:
+                        hist.append(float(p[1]) + float(p[2]))
+        except OSError:
+            pass
+        hist = hist[-20:]
+        avg = sum(hist) / len(hist) if hist else None
+        ratio = round(total / avg, 2) if avg and avg > 0 else None
+        if ratio is None:
+            lab = f"collecte ({len(hist) + 1}j)"
+        elif ratio >= 1.5:
+            lab = "activité anormalement forte"
+        elif ratio >= 1.15:
+            lab = "activité soutenue"
+        elif ratio <= 0.6:
+            lab = "activité faible — marché endormi"
+        else:
+            lab = "activité normale"
+        return {"call": round(call_v), "put": round(put_v), "total": round(total),
+                "avg": round(avg) if avg else None, "ratio": ratio, "label": lab,
+                "days": len(hist), "pcr": round(put_v / call_v, 2) if call_v > 0 else None}
+    except Exception:
+        return None
+
+_UNDERLYING_VOL_CACHE = {}
+
+def underlying_volume(asset, cfg):
+    """Volume du sous-jacent : 24h crypto (Hyperliquid) ou dernière séance (Stooq),
+    comparé à la moyenne 20 jours. None si source indisponible."""
+    import time as _t
+    now = _t.time()
+    c = _UNDERLYING_VOL_CACHE.get(asset)
+    if c and now - c[0] < 900:
+        return c[1]
+    try:
+        cur = avg = None
+        unit = ""
+        if cfg["source"] == "deribit":
+            end = int(now * 1000)
+            r = requests.post("https://api.hyperliquid.xyz/info",
+                              json={"type": "candleSnapshot",
+                                    "req": {"coin": asset, "interval": "1h",
+                                            "startTime": end - 21 * 24 * 3600 * 1000,
+                                            "endTime": end}},
+                              timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code != 200:
+                return None
+            candles = r.json()
+            if not isinstance(candles, list) or len(candles) < 48:
+                return None
+            days = [candles[i:i + 24] for i in range(0, len(candles) - 23, 24)]
+            tot = [sum(float(cd["v"]) * float(cd["c"]) for cd in d) for d in days]
+            cur, prev = tot[-1], tot[:-1][-20:]
+            avg = sum(prev) / len(prev) if prev else None
+            unit = "$"
+        else:
+            sym = (cfg.get("cboe") or asset).lower()
+            r = requests.get(f"https://stooq.com/q/d/l/?s={sym}.us&i=d", timeout=8,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code != 200 or "Date" not in r.text[:60]:
+                return None
+            rows = [ln.split(",") for ln in r.text.strip().splitlines()[1:] if ln]
+            vols = [float(x[5]) for x in rows[-21:] if len(x) >= 6 and x[5] not in ("", "N/D")]
+            if len(vols) < 5:
+                return None
+            cur, prev = vols[-1], vols[:-1]
+            avg = sum(prev) / len(prev)
+            unit = "titres"
+        if not cur or not avg:
+            return None
+        ratio = round(cur / avg, 2)
+        lab = ("volume exceptionnel — mouvement crédible" if ratio >= 1.5 else
+               "volume soutenu" if ratio >= 1.15 else
+               "volume faible — mouvement peu crédible" if ratio <= 0.6 else
+               "volume normal")
+        out = {"current": round(cur), "avg": round(avg), "ratio": ratio,
+               "label": lab, "unit": unit}
+        _UNDERLYING_VOL_CACHE[asset] = (now, out)
+        return out
     except Exception:
         return None
 
@@ -1851,6 +2054,9 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     metrics["macro_context"] = macro_context()      # contexte global (mêmes données pour tous)
     metrics["liq_map"] = (hyperliquid_liq_map(asset) if cfg["source"] == "deribit" else None)
     metrics["data_health"] = data_health()
+    metrics["flow_summary"] = (flow_summary(asset, S) if cfg["source"] == "deribit" else None)
+    metrics["option_volume"] = option_volume(asset, book)
+    metrics["underlying_volume"] = underlying_volume(asset, cfg)
     # Book TOTAL (toutes échéances) : la métrique comparable aux sites publics
     gex_book_tot, _ = gamma_exposure(book, S, csize, signs=signs)
     dex_book_tot = delta_exposure(book, S, csize)

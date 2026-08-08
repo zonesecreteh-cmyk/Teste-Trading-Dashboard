@@ -80,6 +80,11 @@ def check_asset(asset, cfg):
     if m.get("macro_context"): ok()
     else: warn("macro_context=None (historiques pas encore lisibles ?)")
 
+    if m.get("option_volume"): ok()
+    else: warn("option_volume=None (volume absent du book ?)")
+    if m.get("underlying_volume"): ok()
+    else: warn("underlying_volume=None (Hyperliquid/Stooq muet pour cet actif)")
+
     ds = m.get("dealer_sign") or {}
     if crypto:
         if ds.get("mode") in ("fixed", "empirical"): ok()

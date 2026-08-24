@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-08-08-a"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-08-08-g"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer ---------------------------------------------
 # IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
@@ -1003,29 +1003,100 @@ TH = {
 def _vote(direction, strength, reason):
     return {"verdict": direction, "strength": strength, "reason": reason}
 
+def _pin_weight(m):
+    """Poids de l'aimantation max pain selon la proximite de l'echeance dominante.
+
+    Le "pin risk" est un phenomene de FIN DE VIE des options : il se manifeste dans
+    les derniers jours avant expiration, quand le gamma explose et que les dealers
+    doivent hedger de plus en plus fort autour des gros strikes. A 30 jours de
+    l'echeance, il est negligeable.
+
+    Sans cette ponderation, un max pain structurellement eloigne du spot (cas du BTC
+    en tendance : max pain 68k pendant que le spot est a 77k) fait voter L1 dans la
+    meme direction tous les jours pendant des semaines — un biais, pas un signal.
+    """
+    cal = (m.get("expiry_calendar") or {}).get("rows") or []
+    if not cal:
+        return 0.35                                  # calendrier indisponible : poids prudent
+    # echeance qui porte le plus de gamma parmi les proches, sinon la plus proche
+    grosses = [r for r in cal if (r.get("gamma_pct") or 0) >= 15]
+    ref = min(grosses, key=lambda r: r["days"]) if grosses else min(cal, key=lambda r: r["days"])
+    d = max(0, ref.get("days", 30))
+    return round(math.exp(-d / 6.0), 3)              # 0j->1.0  3j->0.61  7j->0.31  21j->0.03
+
 def level_regime(m):
-    """L1 — range vs amplification + aimantation max pain."""
+    """L1 — regime (range vs amplification) + aimantation max pain ponderee."""
     gex = m["gex_total_musd"]
     mp_pct = m["max_pain_vs_spot_pct"]
     if gex < 0:
         return _vote("NEUTRAL", 0.3, "Gamma négatif : amplification, pas d'ancrage directionnel")
-    # gamma positif -> prix aimanté vers le max pain
+    w = _pin_weight(m)
+    if w < 0.12:
+        return _vote("NEUTRAL", 0.3,
+                     f"Gamma positif mais échéance dominante trop lointaine : "
+                     f"l'aimantation max pain ({mp_pct:+.1f}%) n'agit pas encore")
+    force = min(1.0, abs(mp_pct) / 2) * w
     if mp_pct > TH["regime_maxpain_pct"]:
-        return _vote("BULL", min(1.0, abs(mp_pct) / 2), f"Max pain {mp_pct:+.1f}% au-dessus du spot, aimantation haussière")
+        return _vote("BULL", force,
+                     f"Max pain {mp_pct:+.1f}% au-dessus du spot, aimantation haussière "
+                     f"(poids échéance {w:.2f})")
     if mp_pct < -TH["regime_maxpain_pct"]:
-        return _vote("BEAR", min(1.0, abs(mp_pct) / 2), f"Max pain {mp_pct:+.1f}% sous le spot, aimantation baissière")
+        return _vote("BEAR", force,
+                     f"Max pain {mp_pct:+.1f}% sous le spot, aimantation baissière "
+                     f"(poids échéance {w:.2f})")
     return _vote("NEUTRAL", 0.4, "Spot collé au max pain, pas de cible nette")
 
+def rr_baseline(asset, crypto):
+    """Niveau NORMAL du risk reversal pour cet actif.
+
+    Le skew est structurellement négatif (puts chers) : sur crypto il tourne
+    couramment entre -3 et -7, sur indices autour de -2. Comparer ces valeurs à 0
+    fait voter BEAR en permanence — c'est le biais qu'on corrige ici, exactement
+    comme on l'a fait pour le Put/Call ratio.
+
+    On utilise la MÉDIANE de l'historique réel de l'actif dès 20 points ; sinon on
+    retombe sur une référence de classe. Le verdict devient donc "anormalement
+    peureux / optimiste PAR RAPPORT À SON PROPRE NORMAL", et non dans l'absolu.
+    """
+    vals = []
+    try:
+        for r in _read_history_file(asset, "mensuel"):
+            v = r.get("rr")
+            if isinstance(v, (int, float)):
+                vals.append(v)
+    except Exception:
+        vals = []
+    vals = vals[-90:]
+    if len(vals) >= 20:
+        vals_tri = sorted(vals)
+        n = len(vals_tri)
+        med = (vals_tri[n // 2] if n % 2 else (vals_tri[n // 2 - 1] + vals_tri[n // 2]) / 2)
+        # dispersion robuste (écart absolu médian) -> largeur de la zone "normale"
+        ecarts = sorted(abs(v - med) for v in vals_tri)
+        mad = (ecarts[n // 2] if n % 2 else (ecarts[n // 2 - 1] + ecarts[n // 2]) / 2)
+        return {"base": round(med, 2), "spread": round(max(0.8, 1.5 * mad), 2),
+                "src": f"médiane {n}j"}
+    return ({"base": -3.5, "spread": 2.0, "src": "référence crypto"} if crypto
+            else {"base": -1.5, "spread": 1.2, "src": "référence indices"})
+
 def level_positioning(m):
-    """L2 — skew (risk reversal) + flux delta."""
+    """L2 — skew (risk reversal) lu PAR RAPPORT au normal de l'actif."""
     rr = m["rr_monthly"] if m["rr_monthly"] is not None else m["rr_weekly"]
     if rr is None:
         return _vote("NEUTRAL", 0.0, "Skew indisponible")
-    if rr <= TH["rr_bear"]:
-        return _vote("BEAR", min(1.0, abs(rr) / 5), f"Risk reversal {rr} : puts biddés, couverture institutionnelle")
-    if rr >= TH["rr_bull"]:
-        return _vote("BULL", min(1.0, rr / 5), f"Risk reversal {rr} : appétit call, optimisme")
-    return _vote("NEUTRAL", 0.3, f"Risk reversal {rr} : skew neutre")
+    b = m.get("rr_baseline") or {"base": 0.0, "spread": 1.5, "src": "brut"}
+    ecart = rr - b["base"]                       # <0 = plus peureux que d'habitude
+    force = min(1.0, abs(ecart) / (2 * b["spread"]))
+    if ecart <= -b["spread"]:
+        return _vote("BEAR", force,
+                     f"Risk reversal {rr} vs normal {b['base']} ({b['src']}) : "
+                     f"peur inhabituelle, puts nettement plus chers que d'ordinaire")
+    if ecart >= b["spread"]:
+        return _vote("BULL", force,
+                     f"Risk reversal {rr} vs normal {b['base']} ({b['src']}) : "
+                     f"appétit call inhabituel")
+    return _vote("NEUTRAL", 0.3,
+                 f"Risk reversal {rr} conforme au normal de l'actif ({b['base']}, {b['src']})")
 
 def level_structure(m):
     """L3 — term structure. Mesure le STRESS, pas la direction : la backwardation
@@ -1237,7 +1308,75 @@ def read_total_history(asset):
 # Réutilise l'historique DÉJÀ collecté par iv_percentile ({asset}.csv) — pas de
 # fichier séparé. Place l'IV du jour dans sa distribution : 80 = plus haute que 80%
 # des jours enregistrés (optionalité chère). status='collecting' sous 5 jours.
+# --- DVOL : l'indice de volatilite implicite officiel de Deribit (le "VIX du BTC") ---
+# Deribit n'archive PAS les chaines d'options passees (donc pas de GEX historique),
+# mais il publie le DVOL en bougies journalieres sur PLUSIEURS ANNEES. On s'en sert
+# pour situer la volatilite actuelle dans son histoire longue au lieu de 50 jours.
+# Cache disque : on ne refait le reseau qu'une fois par jour.
+def _dvol_path(currency):
+    return os.path.join(HIST_DIR, f"{currency}_dvol.csv")
+
+def dvol_history(currency, years=3):
+    """[(date, close)] du DVOL. Cache local rafraichi une fois par jour."""
+    if currency not in ("BTC", "ETH"):
+        return []
+    path = _dvol_path(currency)
+    today = dt.date.today().isoformat()
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                p = line.strip().split(",")
+                if len(p) >= 2:
+                    rows.append((p[0], float(p[1])))
+    except (OSError, ValueError):
+        rows = []
+    if rows and rows[-1][0] >= today:
+        return rows                                   # deja a jour aujourd'hui
+    try:
+        import time as _t
+        end = int(_t.time() * 1000)
+        got = {}
+        # on decoupe en tranches d'un an : l'API limite l'amplitude par requete
+        for k in range(years):
+            hi = end - k * 365 * 86400000
+            lo = hi - 365 * 86400000
+            r = requests.get(f"{DERIBIT}/public/get_volatility_index_data",
+                             params={"currency": currency, "start_timestamp": lo,
+                                     "end_timestamp": hi, "resolution": "1D"},
+                             timeout=15)
+            if r.status_code != 200:
+                break
+            data = (r.json().get("result") or {}).get("data") or []
+            if not data:
+                break
+            for c in data:
+                # format : [timestamp, open, high, low, close]
+                d = dt.datetime.fromtimestamp(c[0] / 1000, dt.timezone.utc).date().isoformat()
+                got[d] = float(c[4])
+        if got:
+            rows = sorted(got.items())
+            os.makedirs(HIST_DIR, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                for d, v in rows:
+                    f.write(f"{d},{round(v, 2)}\n")
+    except Exception:
+        pass
+    return rows
+
 def iv_rank(asset, iv_now):
+    """Place la volatilite du jour dans sa distribution historique.
+
+    Priorite au DVOL (annees d'historique, indice officiel Deribit) ; sinon on
+    retombe sur l'IV que l'on collecte nous-memes (quelques semaines)."""
+    dv = dvol_history(asset)
+    if len(dv) >= 60:
+        vals = [v for _, v in dv]
+        cur = vals[-1]
+        rank = round(100 * sum(1 for v in vals if v <= cur) / len(vals))
+        return {"status": "ok", "iv": round(cur, 1), "rank": rank, "days": len(vals),
+                "lo": round(min(vals), 1), "hi": round(max(vals), 1),
+                "src": "DVOL Deribit", "years": round(len(vals) / 365, 1)}
     if iv_now is None:
         return None
     vals = []
@@ -1257,7 +1396,7 @@ def iv_rank(asset, iv_now):
         return {"status": "collecting", "have": len(vals), "iv": iv_now}
     rank = round(100 * sum(1 for v in vals if v <= iv_now) / len(vals))
     return {"status": "ok", "iv": iv_now, "rank": rank, "days": len(vals),
-            "lo": round(min(vals), 1), "hi": round(max(vals), 1)}
+            "lo": round(min(vals), 1), "hi": round(max(vals), 1), "src": "IV collectee"}
 
 def futures_basis(currency):
     """Basis annualisé des futures datés Deribit vs index (contango/backwardation).
@@ -1470,6 +1609,163 @@ def flow_summary(asset, ref_price):
         }
     except Exception:
         return None
+
+# === Détection des changements notables (rapport intelligent) =====================
+# Compare l'état du jour à celui de la veille et ne retient QUE ce qui a vraiment
+# changé, avec un niveau de gravité. C'est ce qui transforme une liste de chiffres
+# en "voilà ce qui s'est passé depuis hier et pourquoi ça compte".
+def _daily_state_path(asset):
+    return os.path.join(HIST_DIR, f"{asset}_state.json")
+
+def _capture_state(m):
+    """Photo compacte des indicateurs qu'on veut surveiller d'un jour à l'autre."""
+    c = m.get("convergence") or {}
+    bt = m.get("book_total") or {}
+    fs = m.get("flow_summary") or {}
+    f = m.get("funding") or {}
+    ivr = m.get("iv_rank") or {}
+    return {
+        "date": dt.date.today().isoformat(),
+        "spot": m.get("spot"),
+        "gex": bt.get("gex_musd", m.get("gex_total_musd")),
+        "dex": bt.get("dex_musd", m.get("dex_total_musd")),
+        "flip": m.get("gamma_flip"),
+        "max_pain": m.get("max_pain"),
+        "regime": m.get("regime_label") or c.get("direction"),
+        "conviction": c.get("conviction"),
+        "score": c.get("score"),
+        "iv30": m.get("iv30"),
+        "iv_rank": ivr.get("rank"),
+        "rr": m.get("rr_monthly") if m.get("rr_monthly") is not None else m.get("rr_weekly"),
+        "funding_ann": f.get("annualized_pct"),
+        "flow_net": fs.get("net_musd"),
+        "vol_pct": fs.get("vol_pct"),
+        "sign_mode": (m.get("dealer_sign") or {}).get("mode"),
+    }
+
+def _read_prev_state(asset, today):
+    try:
+        with open(_daily_state_path(asset), encoding="utf-8") as f:
+            st = json.load(f)
+        return st if st.get("date") != today else st.get("_prev")
+    except Exception:
+        return None
+
+def save_state(asset, m):
+    """Écrit l'état du jour en gardant celui de la veille sous _prev."""
+    try:
+        os.makedirs(HIST_DIR, exist_ok=True)
+        cur = _capture_state(m)
+        old = None
+        try:
+            with open(_daily_state_path(asset), encoding="utf-8") as f:
+                old = json.load(f)
+        except Exception:
+            pass
+        if old and old.get("date") != cur["date"]:
+            old.pop("_prev", None)
+            cur["_prev"] = old
+        elif old and old.get("_prev"):
+            cur["_prev"] = old["_prev"]          # même jour : on garde la vraie veille
+        with open(_daily_state_path(asset), "w", encoding="utf-8") as f:
+            json.dump(cur, f)
+    except Exception:
+        pass
+
+def detect_changes(asset, m):
+    """Renvoie la liste des changements notables vs la veille, triés par gravité.
+    [{'level':'fort|moyen|info', 'text':..., 'why':...}]"""
+    today = dt.date.today().isoformat()
+    prev = _read_prev_state(asset, today)
+    cur = _capture_state(m)
+    if not prev:
+        return []
+    out = []
+
+    def num(a, b):
+        return isinstance(a, (int, float)) and isinstance(b, (int, float))
+
+    # 1) GEX qui change de signe = changement de RÉGIME (le plus important)
+    if num(cur["gex"], prev.get("gex")) and (cur["gex"] < 0) != (prev["gex"] < 0):
+        sens = "NÉGATIF (amplification)" if cur["gex"] < 0 else "POSITIF (amortissement)"
+        out.append({"level": "fort",
+                    "text": f"GEX passe {sens} : {prev['gex']:+.1f} → {cur['gex']:+.1f}M$",
+                    "why": "les dealers changent de comportement : ils amplifient au lieu d'absorber (ou l'inverse)"})
+
+    # 2) Spot qui franchit le gamma flip
+    if num(cur["spot"], prev.get("spot")) and num(cur["flip"], prev.get("flip")):
+        was, now = prev["spot"] > prev["flip"], cur["spot"] > cur["flip"]
+        if was != now:
+            out.append({"level": "fort",
+                        "text": f"Spot {'repasse AU-DESSUS' if now else 'casse SOUS'} le gamma flip (${cur['flip']:,.0f})",
+                        "why": "au-dessus = marché amorti, en-dessous = mouvements amplifiés"})
+
+    # 3) Verdict de convergence
+    if cur["conviction"] != prev.get("conviction") or cur["regime"] != prev.get("regime"):
+        out.append({"level": "moyen",
+                    "text": f"Verdict : {prev.get('regime')} {prev.get('conviction')} → {cur['regime']} {cur['conviction']}",
+                    "why": "l'alignement des niveaux directionnels a changé"})
+
+    # 4) Max pain qui se déplace fortement
+    if num(cur["max_pain"], prev.get("max_pain")) and prev["max_pain"]:
+        var = (cur["max_pain"] / prev["max_pain"] - 1) * 100
+        if abs(var) >= 3:
+            out.append({"level": "moyen",
+                        "text": f"Max pain déplacé de {var:+.1f}% : ${prev['max_pain']:,.0f} → ${cur['max_pain']:,.0f}",
+                        "why": "l'aimant du marché s'est déplacé — souvent après une grosse expiration"})
+
+    # 5) IV : variation forte ou extrême de rank
+    if num(cur["iv30"], prev.get("iv30")) and prev["iv30"]:
+        var = cur["iv30"] - prev["iv30"]
+        if abs(var) >= 5:
+            out.append({"level": "moyen",
+                        "text": f"IV 30j {var:+.1f} pts : {prev['iv30']:.1f}% → {cur['iv30']:.1f}%",
+                        "why": "hausse = le marché price plus de risque ; baisse = complaisance"})
+    if num(cur["iv_rank"], prev.get("iv_rank")):
+        if cur["iv_rank"] >= 80 > prev.get("iv_rank", 0):
+            out.append({"level": "moyen", "text": f"IV Rank entre en zone haute ({cur['iv_rank']}/100)",
+                        "why": "optionalité chère — vendre de la vol devient plus favorable"})
+        elif cur["iv_rank"] <= 20 < prev.get("iv_rank", 100):
+            out.append({"level": "moyen", "text": f"IV Rank entre en zone basse ({cur['iv_rank']}/100)",
+                        "why": "optionalité bon marché — acheter de la vol devient plus favorable"})
+
+    # 6) Skew qui s'inverse
+    if num(cur["rr"], prev.get("rr")) and (cur["rr"] > 0) != (prev["rr"] > 0):
+        out.append({"level": "moyen",
+                    "text": f"Skew 25Δ s'inverse : {prev['rr']:+.2f} → {cur['rr']:+.2f}",
+                    "why": "bascule entre demande de protection (puts) et spéculation (calls)"})
+
+    # 7) Funding : emballement ou détente
+    if num(cur["funding_ann"], prev.get("funding_ann")):
+        if abs(cur["funding_ann"]) >= 25 and abs(prev["funding_ann"]) < 25:
+            out.append({"level": "moyen",
+                        "text": f"Funding s'emballe : {prev['funding_ann']:+.0f}% → {cur['funding_ann']:+.0f}% annualisé",
+                        "why": "levier déséquilibré — risque de reversal / liquidations en cascade"})
+        elif abs(cur["funding_ann"]) < 10 <= abs(prev["funding_ann"]):
+            out.append({"level": "info", "text": f"Funding se normalise ({cur['funding_ann']:+.0f}% annualisé)",
+                        "why": "le levier se dégonfle, stress en baisse"})
+
+    # 8) Flux client qui s'inverse
+    if num(cur["flow_net"], prev.get("flow_net")) and (cur["flow_net"] > 0) != (prev["flow_net"] > 0):
+        out.append({"level": "moyen",
+                    "text": f"Flux client s'inverse : clients {'acheteurs' if cur['flow_net'] > 0 else 'vendeurs'} nets d'options ({cur['flow_net']:+.1f}M$)",
+                    "why": "les dealers prennent l'autre côté — leur hedge change de sens"})
+
+    # 9) Sens de la volatilité
+    if num(cur["vol_pct"], prev.get("vol_pct")) and (cur["vol_pct"] > 5) != (prev["vol_pct"] > 5) \
+            and abs(cur["vol_pct"] - prev["vol_pct"]) >= 10:
+        out.append({"level": "info",
+                    "text": f"Sens de la vol : clients {'acheteurs' if cur['vol_pct'] > 5 else 'vendeurs'} de volatilité ({cur['vol_pct']:+.0f}%)",
+                    "why": "détermine si les dealers sont long ou short vega"})
+
+    # 10) Bascule du mode de signe (fixe -> empirique)
+    if cur["sign_mode"] != prev.get("sign_mode") and cur["sign_mode"] == "empirical":
+        out.append({"level": "info", "text": "Signe dealer désormais MESURÉ sur le tape (mode empirique actif)",
+                    "why": "les chiffres GEX/DEX ne sont plus basés sur une convention supposée"})
+
+    order = {"fort": 0, "moyen": 1, "info": 2}
+    out.sort(key=lambda x: order[x["level"]])
+    return out
 
 # === Contexte macro : corrélation BTC/SPX, proxy dollar, régime risk-on/off =======
 # ZÉRO nouvelle source : tout vient des historiques quotidiens déjà collectés.
@@ -1896,39 +2192,34 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     # --- Signe dealer : figé (fixed) ou déduit du skew (adaptive). Heuristique, voir en-tête. ---
     # On prend le RR mensuel (skew structurel, moins bruité que le court terme) comme orientation.
     rr_for_sign = risk_reversal(book, 30)
-    # Sélection AUTOMATIQUE du signe dealer — plus de choix manuel dans l'UI :
-    #   macro          -> FIXE (standard indices : puts de couverture + calls couverts)
-    #   BTC/ETH        -> EMPIRIQUE (mesuré sur le tape) dès TAPE_MIN_DAYS jours, sinon fixe
-    #   altcoins       -> FIXE (pas de tape exploitable)
-    # L'adaptatif n'est plus exposé, mais reste calculé et ENREGISTRÉ chaque jour dans
-    # l'historique (colonnes dédiées) : le backtest tranchera fixe vs adaptatif plus tard.
-    # Le paramètre sign_mode est conservé pour compat mais ignoré.
-    if not crypto:
-        sc, sp, sign_info = dealer_signs(rr_for_sign, mode="fixed")
-        sign_info["locked"] = True
-        sign_info["reason"] = "convention fixe verrouillée (standard indices : puts de couverture + calls couverts)"
-    else:
+    # === SIGNE DEALER : convention FIXE, toujours. ================================
+    # C'est le standard publié par SpotGamma, Laevitas, CryptoGamma et les desks :
+    # dealers longs calls / courts puts. Elle n'est pas "parfaite" (l'inventaire réel
+    # des dealers n'est pas public) mais elle est STABLE et COMPARABLE aux sources
+    # externes — un chiffre vérifiable vaut mieux qu'un chiffre plus malin que
+    # personne d'autre ne calcule.
+    #
+    # Le tape (mode empirique) reste MESURÉ et affiché comme INFORMATION séparée
+    # ("le flux client suggère X"), mais il ne pilote plus les chiffres : inverser
+    # tout le GEX sur quelques jours de tape, c'est promouvoir du bruit en vérité.
+    sc, sp, sign_info = dealer_signs(rr_for_sign, mode="fixed")
+    sign_info["locked"] = True
+    sign_info["reason"] = ("convention fixe (standard SpotGamma/Laevitas) — "
+                           "comparable aux sources publiques")
+    if crypto:
         emp = empirical_signs(asset)
         if emp and emp.get("status") == "ok":
-            sc, sp = emp["sc"], emp["sp"]
-            sign_info = {"mode": "empirical", "rr": rr_for_sign,
-                         "flipped": (sc, sp) != (SIGN_CALL, SIGN_PUT),
-                         "tape_days": emp["days"],
-                         "reason": f"mesuré sur {emp['days']}j de tape : clients "
-                                   f"{'achètent' if emp['net_call_musd'] > 0 else 'vendent'} les calls net "
-                                   f"({emp['net_call_musd']:+}M$), "
-                                   f"{'achètent' if emp['net_put_musd'] > 0 else 'vendent'} les puts net "
-                                   f"({emp['net_put_musd']:+}M$)"}
-        else:
-            sc, sp, sign_info = dealer_signs(rr_for_sign, mode="fixed")
-            if asset in ("BTC", "ETH"):
-                have = emp.get("have", 0) if emp else 0
-                need = emp.get("need", TAPE_MIN_DAYS) if emp else TAPE_MIN_DAYS
-                sign_info["pending_tape"] = f"{have}/{need}"
-                sign_info["reason"] = (f"fixe en attendant le tape ({have}/{need}j de collecte) — "
-                                       f"bascule empirique automatique ensuite")
-            else:
-                sign_info["reason"] = "convention fixe (pas de tape exploitable sur cet actif)"
+            # information seulement : ce que le tape suggérerait, sans l'appliquer
+            sign_info["tape_days"] = emp["days"]
+            sign_info["tape_suggests_flip"] = ((emp["sc"], emp["sp"]) != (SIGN_CALL, SIGN_PUT))
+            sign_info["tape_note"] = (
+                f"tape {emp['days']}j : clients "
+                f"{'acheteurs' if emp['net_call_musd'] > 0 else 'vendeurs'} nets de calls "
+                f"({emp['net_call_musd']:+}M$), "
+                f"{'acheteurs' if emp['net_put_musd'] > 0 else 'vendeurs'} nets de puts "
+                f"({emp['net_put_musd']:+}M$)")
+        elif emp:
+            sign_info["pending_tape"] = f"{emp.get('have', 0)}/{emp.get('need', TAPE_MIN_DAYS)}"
     signs = (sc, sp)
 
     gex_total, gex_strikes = gamma_exposure(book_dte, S, csize, signs=signs)
@@ -1997,6 +2288,8 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     metrics["dealer_sign"]["adaptive_would"] = ainfo["reason"]
     metrics["dealer_sign"]["adaptive_diverges"] = ((ac, ap) != signs)
 
+    metrics["expiry_calendar"] = expiry_calendar(book, S, csize)  # avant converge : L1 s'en sert
+    metrics["rr_baseline"] = rr_baseline(asset, crypto)   # normal du skew pour CET actif
     metrics["convergence"] = converge(metrics, catalyst_bias)
     # Historique PAR HORIZON. Le label vient de daily.py (snappé sur la vraie échéance) ;
     # sinon on le déduit du DTE pour savoir quelle série montrer (vue interactive).
@@ -2055,6 +2348,8 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     metrics["liq_map"] = (hyperliquid_liq_map(asset) if cfg["source"] == "deribit" else None)
     metrics["data_health"] = data_health()
     metrics["flow_summary"] = (flow_summary(asset, S) if cfg["source"] == "deribit" else None)
+    metrics["changes"] = detect_changes(asset, metrics)   # vs la veille (avant réécriture de l'état)
+    save_state(asset, metrics)
     metrics["option_volume"] = option_volume(asset, book)
     metrics["underlying_volume"] = underlying_volume(asset, cfg)
     # Book TOTAL (toutes échéances) : la métrique comparable aux sites publics
@@ -2072,7 +2367,6 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     metrics["vex_musd"] = round(vex_1pt / 1e6, 1)
     metrics["theta_musd"] = round(theta_daily / 1e6, 1)
     # Calendrier des échéances : book COMPLET (le but est de voir tout ce qui expire)
-    metrics["expiry_calendar"] = expiry_calendar(book, S, csize)
     # IV Rank : réutilise l'historique d'iv_percentile (aucune collecte séparée)
     metrics["iv_rank"] = iv_rank(asset, metrics.get("iv30"))
     # Basis futures datés (contango/backwardation) — crypto inverse seulement

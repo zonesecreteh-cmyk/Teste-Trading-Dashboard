@@ -113,6 +113,18 @@ def build_report(date, results):
             c = d["convergence"]
             add(f"  {a:5} {c['direction']:9} {c['conviction']:8} score {c['score']:+5}")
 
+    # --- changements notables vs la veille (le coeur du rapport intelligent) ---
+    add("\nCE QUI A CHANGÉ DEPUIS HIER :")
+    n_chg = 0
+    icon = {"fort": "!!!", "moyen": " !!", "info": "  ·"}
+    for asset, d in results.items():
+        for ch in (d.get("changes") or []):
+            add(f"  {icon.get(ch['level'], '  ·')} [{asset}] {ch['text']}")
+            add(f"        -> {ch['why']}")
+            n_chg += 1
+    if n_chg == 0:
+        add("  (rien de notable — état stable, ou première journée de comparaison)")
+
     # --- alertes ---
     add("\nALERTES :")
     n_alerts = 0

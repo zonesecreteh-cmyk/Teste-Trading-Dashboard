@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-08-08-g"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-08-08-i"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer ---------------------------------------------
 # IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
@@ -902,6 +902,18 @@ def iv_percentile(asset, atm_iv_30d):
         with open(path, "a") as f:
             f.write(f"{today},{atm_iv_30d}\n")
         hist.append((today, atm_iv_30d))
+    # Profondeur : on privilegie le DVOL (indice officiel Deribit, plusieurs annees)
+    # plutot que nos quelques semaines de collecte. Sans ca, le percentile qui alimente
+    # L4 ET le score de stress reposerait sur ~50 jours alors que l'IV Rank affiche
+    # 3 ans -> deux chiffres contradictoires pour la meme notion.
+    try:
+        dv = dvol_history(asset)
+    except Exception:
+        dv = []
+    if len(dv) >= 60:
+        dvals = [v for _, v in dv]
+        cur = dvals[-1]
+        return round(100 * sum(v <= cur for v in dvals) / len(dvals)), len(dvals)
     vals = [v for _, v in hist]
     if len(vals) < 2:
         return None, len(vals)

@@ -61,7 +61,22 @@ def build_alerts(asset, d):
     if f and abs(f.get("annualized_pct") or 0) >= 25:
         alerts.append(f"{asset}: funding {f['annualized_pct']:+.0f}% annualisé -> "
                       f"levier déséquilibré, reversal possible")
-    # 5) Gros mouvement d'OI (si mesuré)
+    # 5) Pic d'activite sur les options (volume du jour vs sa moyenne)
+    ov = d.get("option_volume")
+    if ov and ov.get("ratio") and ov["ratio"] >= 1.6 and ov.get("days", 0) >= 5:
+        alerts.append(f"{asset}: activite options x{ov['ratio']} vs moyenne {ov['days']}j "
+                      f"({ov['total']:,} contrats) -> attention inhabituelle sur cet actif")
+    # 6) Volume du sous-jacent anormal (credibilite du mouvement de prix)
+    uv = d.get("underlying_volume")
+    if uv and uv.get("ratio"):
+        if uv["ratio"] >= 1.8:
+            alerts.append(f"{asset}: volume sous-jacent x{uv['ratio']} vs moyenne 20j "
+                          f"-> mouvement de prix credible")
+        elif uv["ratio"] <= 0.5:
+            alerts.append(f"{asset}: volume sous-jacent x{uv['ratio']} seulement "
+                          f"-> mouvement peu credible, mefiance")
+
+    # 7) Gros mouvement d'OI (si mesuré)
     oi = d.get("oi_change_24h")
     if oi and oi.get("status") == "ok":
         nc, np_ = oi.get("net_call_doi") or 0, oi.get("net_put_doi") or 0

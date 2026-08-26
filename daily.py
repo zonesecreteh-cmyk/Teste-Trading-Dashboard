@@ -128,6 +128,27 @@ def build_report(date, results):
             c = d["convergence"]
             add(f"  {a:5} {c['direction']:9} {c['conviction']:8} score {c['score']:+5}")
 
+    # --- QUOI REGARDER AUJOURD'HUI : le classement par importance ---
+    add("\nA REGARDER EN PRIORITE :")
+    n_prio = 0
+    for asset in FOCUS:
+        d = results.get(asset)
+        if not d:
+            continue
+        prios = [p for p in (d.get("priorities") or []) if p["score"] >= 75]
+        if not prios:
+            continue
+        add(f"\n  --- {asset} ---")
+        for p in prios[:3]:
+            add(f"  [{p['score']}] {p['titre']}")
+            add(f"        {p['detail']}")
+            add(f"        -> {p['quoi_faire']}")
+            if p.get("surveiller"):
+                add(f"        A surveiller : {p['surveiller']}")
+            n_prio += 1
+    if n_prio == 0:
+        add("  (rien d'inhabituel aujourd'hui sur les actifs suivis)")
+
     # --- changements notables vs la veille (le coeur du rapport intelligent) ---
     add("\nCE QUI A CHANGÉ DEPUIS HIER :")
     n_chg = 0

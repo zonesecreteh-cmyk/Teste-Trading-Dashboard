@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-08-08-i"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-08-26-h"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer ---------------------------------------------
 # IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
@@ -907,11 +907,11 @@ def iv_percentile(asset, atm_iv_30d):
     # L4 ET le score de stress reposerait sur ~50 jours alors que l'IV Rank affiche
     # 3 ans -> deux chiffres contradictoires pour la meme notion.
     try:
-        dv = dvol_history(asset)
+        hl, _src = long_vol_history(asset)
     except Exception:
-        dv = []
-    if len(dv) >= 60:
-        dvals = [v for _, v in dv]
+        hl = []
+    if hl:
+        dvals = [v for _, v in hl]
         cur = dvals[-1]
         return round(100 * sum(v <= cur for v in dvals) / len(dvals)), len(dvals)
     vals = [v for _, v in hist]
@@ -922,7 +922,8 @@ def iv_percentile(asset, atm_iv_30d):
 
 def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=None, rr=None,
                     store=True, horizon="long", levels=None, gex_fixed=None, gex_adaptive=None,
-                    dex_dealer_fixed=None, dex_dealer_adaptive=None):
+                    dex_dealer_fixed=None, dex_dealer_adaptive=None,
+                    flip=None, call_wall=None, put_wall=None):
     """Historique PAR HORIZON. store=False = lecture seule. Seul daily.py écrit.
     levels = liste ordonnée [L1,L2,L3,L4,L5] de verdicts (BULL/BEAR/NEUTRAL) — colonnes 8-12.
     gex_fixed / gex_adaptive (col 13-14) ET dex_dealer_fixed / dex_dealer_adaptive (col 15-16) :
@@ -954,6 +955,9 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
                 "gex_adaptive": _f(p[13]) if len(p) >= 14 else None,
                 "dex_dealer_fixed": _f(p[14]) if len(p) >= 15 else None,
                 "dex_dealer_adaptive": _f(p[15]) if len(p) >= 16 else None,
+                "flip": _f(p[16]) if len(p) >= 17 else None,
+                "call_wall": _f(p[17]) if len(p) >= 18 else None,
+                "put_wall": _f(p[18]) if len(p) >= 19 else None,
                 "levels": lv}
 
     def _row(h):
@@ -963,7 +967,8 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
         return (f"{h['date']},{s(h['dex'])},{s(h['gex'])},{s(h['score'])},"
                 f"{s(h['spot'])},{s(h['max_pain'])},{s(h.get('rr'))},{lcols},"
                 f"{s(h.get('gex_fixed'))},{s(h.get('gex_adaptive'))},"
-                f"{s(h.get('dex_dealer_fixed'))},{s(h.get('dex_dealer_adaptive'))}\n")
+                f"{s(h.get('dex_dealer_fixed'))},{s(h.get('dex_dealer_adaptive'))},"
+                f"{s(h.get('flip'))},{s(h.get('call_wall'))},{s(h.get('put_wall'))}\n")
 
     hist = []
     if os.path.exists(path):
@@ -982,7 +987,8 @@ def dex_gex_history(asset, dex_musd, gex_musd, score=None, spot=None, max_pain=N
     point = {"date": today, "dex": dex_musd, "gex": gex_musd, "score": score,
              "spot": spot, "max_pain": max_pain, "rr": rr, "levels": lv,
              "gex_fixed": gex_fixed, "gex_adaptive": gex_adaptive,
-             "dex_dealer_fixed": dex_dealer_fixed, "dex_dealer_adaptive": dex_dealer_adaptive}
+             "dex_dealer_fixed": dex_dealer_fixed, "dex_dealer_adaptive": dex_dealer_adaptive,
+             "flip": flip, "call_wall": call_wall, "put_wall": put_wall}
     if not hist or hist[-1]["date"] != today:
         with open(path, "a") as f:
             f.write(_row(point))
@@ -1275,6 +1281,9 @@ def _read_history_file(asset, horizon):
                         "gex_adaptive": f(p[13]) if len(p) >= 14 else None,
                         "dex_dealer_fixed": f(p[14]) if len(p) >= 15 else None,
                         "dex_dealer_adaptive": f(p[15]) if len(p) >= 16 else None,
+                        "flip": f(p[16]) if len(p) >= 17 else None,
+                        "call_wall": f(p[17]) if len(p) >= 18 else None,
+                        "put_wall": f(p[18]) if len(p) >= 19 else None,
                         "levels": lv})
     return out[-90:]
 
@@ -1376,19 +1385,86 @@ def dvol_history(currency, years=3):
         pass
     return rows
 
+# --- Indices de volatilite CBOE : l'equivalent du DVOL pour les actifs macro ------
+# CBOE publie l'historique quotidien de ses indices de vol depuis des decennies.
+# On associe chaque actif macro a son indice de reference pour donner a l'IV
+# percentile la meme profondeur que le DVOL cote crypto.
+CBOE_VOL_INDEX = {
+    "SPX": "VIX", "SPY": "VIX", "DJX": "VXD", "DIA": "VXD",
+    "NDX": "VXN", "QQQ": "VXN", "RUT": "RVX", "IWM": "RVX",
+    "GC": "GVZ", "SLV": "GVZ", "CL": "OVX",
+}
+
+def cboe_vol_history(asset):
+    """[(date, close)] de l'indice de vol CBOE associe. Cache local, 1 fetch/jour."""
+    idx = CBOE_VOL_INDEX.get(asset)
+    if not idx:
+        return []
+    path = os.path.join(HIST_DIR, f"_cboe_{idx}.csv")
+    today = dt.date.today().isoformat()
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                p = line.strip().split(",")
+                if len(p) >= 2:
+                    rows.append((p[0], float(p[1])))
+    except (OSError, ValueError):
+        rows = []
+    if rows and rows[-1][0] >= today:
+        return rows
+    try:
+        r = requests.get(
+            f"https://cdn.cboe.com/api/global/us_indices/daily_prices/{idx}_History.csv",
+            timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return rows
+        out = []
+        for line in r.text.strip().splitlines()[1:]:
+            p = line.split(",")
+            if len(p) >= 5:
+                try:
+                    d = p[0].strip()
+                    if "/" in d:                       # format MM/DD/YYYY
+                        mo, da, yr = d.split("/")
+                        d = f"{yr}-{int(mo):02d}-{int(da):02d}"
+                    out.append((d, float(p[4])))
+                except ValueError:
+                    continue
+        if out:
+            out = out[-2600:]                          # ~10 ans suffisent largement
+            os.makedirs(HIST_DIR, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                for d, v in out:
+                    f.write(f"{d},{round(v, 2)}\n")
+            rows = out
+    except Exception:
+        pass
+    return rows
+
+def long_vol_history(asset):
+    """Historique de vol le plus profond disponible : DVOL (crypto) ou CBOE (macro)."""
+    dv = dvol_history(asset)
+    if len(dv) >= 60:
+        return dv, "DVOL Deribit"
+    cv = cboe_vol_history(asset)
+    if len(cv) >= 60:
+        return cv, f"{CBOE_VOL_INDEX.get(asset)} CBOE"
+    return [], None
+
 def iv_rank(asset, iv_now):
     """Place la volatilite du jour dans sa distribution historique.
 
     Priorite au DVOL (annees d'historique, indice officiel Deribit) ; sinon on
     retombe sur l'IV que l'on collecte nous-memes (quelques semaines)."""
-    dv = dvol_history(asset)
-    if len(dv) >= 60:
-        vals = [v for _, v in dv]
+    hist, src = long_vol_history(asset)
+    if hist:
+        vals = [v for _, v in hist]
         cur = vals[-1]
         rank = round(100 * sum(1 for v in vals if v <= cur) / len(vals))
         return {"status": "ok", "iv": round(cur, 1), "rank": rank, "days": len(vals),
                 "lo": round(min(vals), 1), "hi": round(max(vals), 1),
-                "src": "DVOL Deribit", "years": round(len(vals) / 365, 1)}
+                "src": src, "years": round(len(vals) / 252, 1)}
     if iv_now is None:
         return None
     vals = []
@@ -1684,6 +1760,183 @@ def save_state(asset, m):
     except Exception:
         pass
 
+def priorities(m, asset):
+    """QUOI REGARDER AUJOURD'HUI — note chaque situation (0-100) et ne remonte que ce
+    qui sort de l'ordinaire, avec une lecture detaillee : ce que ca signifie, ce que
+    ca implique concretement, et ce qui invaliderait la lecture."""
+    out = []
+    gex = m.get("gex_total_musd")
+    spot = m.get("spot")
+    em = (m.get("expected_move") or {})
+    walls = (m.get("gamma_walls") or {})
+    cw, pw = walls.get("call_wall"), walls.get("put_wall")
+    mp = m.get("max_pain")
+
+    def euro(x):
+        return f"${x:,.0f}" if isinstance(x, (int, float)) else "?"
+
+    def add(score, titre, detail, faire, surveiller=None):
+        out.append({"score": int(max(0, min(100, score))), "titre": titre,
+                    "detail": detail, "quoi_faire": faire,
+                    "surveiller": surveiller})
+
+    # 1) REGIME
+    if isinstance(gex, (int, float)):
+        borne = ""
+        if cw and pw:
+            borne = f" Les bornes du jour : mur put {euro(pw)} en bas, mur call {euro(cw)} en haut."
+        if gex < 0:
+            add(85, "Regime d'AMPLIFICATION (gamma negatif)",
+                f"GEX {gex:+,.0f}M$. Les dealers sont du mauvais cote du gamma : quand le prix "
+                f"monte ils doivent acheter, quand il baisse ils doivent vendre. Leur couverture "
+                f"POUSSE le mouvement au lieu de le freiner." + borne,
+                "Concretement : les cassures ont plus de chances d'aller au bout, les retours a la "
+                "moyenne echouent plus souvent. Privilegier le suivi de tendance, entrer sur cassure "
+                "plutot que sur repli. Elargir les stops (la volatilite realisee sera superieure a "
+                "l'ordinaire) et reduire la taille pour compenser.",
+                "Un retour du GEX en territoire positif : le regime redeviendrait amorti.")
+        else:
+            add(70, "Regime de RANGE (gamma positif)",
+                f"GEX {gex:+,.0f}M$. Les dealers absorbent : ils vendent quand ca monte et achetent "
+                f"quand ca baisse. Leur couverture FREINE le mouvement." + borne
+                + (f" Aimant : max pain {euro(mp)}." if mp else ""),
+                "Concretement : les extremes ont tendance a etre rachetes, les cassures echouent plus "
+                "souvent. Privilegier les strategies de range : vendre pres du mur call, acheter pres "
+                "du mur put, viser le centre. Stops plus serres acceptables, la volatilite realisee "
+                "sera inferieure a l'ordinaire.",
+                "Une cassure nette d'un mur avec volume : le gamma se reduirait et le regime changerait.")
+
+    # 2) PROXIMITE DU FLIP
+    fv = m.get("flip_vs_spot_pct")
+    flip = m.get("gamma_flip")
+    if isinstance(fv, (int, float)) and abs(fv) <= 1.5:
+        au_dessus = fv < 0
+        add(95, "Spot COLLE au gamma flip",
+            f"Le flip est a {euro(flip)}, soit {abs(fv):.1f}% du spot. Le spot est "
+            f"{'AU-DESSUS' if au_dessus else 'SOUS'} ce niveau. C'est la frontiere exacte entre les "
+            f"deux regimes : au-dessus le marche est amorti, en dessous il est amplifie.",
+            "Concretement : la nature meme du marche peut changer dans la journee. Une position prise "
+            "maintenant peut se retrouver dans un regime oppose en quelques heures. Le plus sage est "
+            "d'attendre la cassure et de trader DANS le nouveau regime : si ca casse par le bas, "
+            "passer en mode tendance (le mouvement s'auto-entretient) ; si ca tient au-dessus, "
+            "revenir en mode range.",
+            f"Le franchissement franc de {euro(flip)}, confirme par du volume.")
+
+    # 3) EXPIRATION MAJEURE
+    for r in (m.get("expiry_calendar") or {}).get("rows", []):
+        if r["days"] <= 7 and r["gamma_pct"] >= 25:
+            mp_e = r.get("max_pain")
+            ecart = ((mp_e / spot - 1) * 100) if (mp_e and spot) else None
+            add(90 - r["days"] * 3, f"Expiration majeure dans {r['days']}j",
+                f"{r['gamma_pct']}% du gamma total disparait le {r['date']} "
+                f"({r['notional_musd']:,}M$ de notionnel)"
+                + (f", max pain de cette echeance {euro(mp_e)}"
+                   f" ({ecart:+.1f}% du spot)" if ecart is not None else "")
+                + ". Ce gamma est ce qui tient actuellement le prix.",
+                "Concretement, deux phases. AVANT : plus on approche, plus les dealers hedgent fort "
+                "autour des gros strikes — le prix a tendance a etre 'epingle' pres du max pain de "
+                "cette echeance, et la volatilite realisee reste contenue. APRES : ce gamma sort du "
+                "book d'un coup, les dealers n'ont plus a hedger ces positions, et le marche est "
+                "libere. Les mouvements post-expiration sont souvent plus amples. Ne pas construire "
+                "de position longue duree sur les niveaux actuels : ils sont perimes apres cette date.",
+                f"Recalculer tous les niveaux le {r['date']} au soir : flip, murs et max pain "
+                f"seront differents.")
+            break
+
+    # 4) EXTREMES DE VOLATILITE
+    ivr = m.get("iv_rank") or {}
+    if ivr.get("status") == "ok":
+        if ivr["rank"] >= 85:
+            add(75, f"Volatilite TRES CHERE ({ivr['rank']}/100)",
+                f"L'IV actuelle ({ivr['iv']}%) est plus haute que {ivr['rank']}% des "
+                f"{ivr.get('years', '?')} dernieres annees ({ivr.get('src')}). "
+                f"Bornes historiques : {ivr.get('lo')}% a {ivr.get('hi')}%.",
+                "Concretement : acheter des options coute cher, et le temps joue contre l'acheteur. "
+                "Les strategies vendeuses de prime (spreads vendeurs, iron condors) sont statistiquement "
+                "favorisees. Mais attention : une IV elevee signale souvent un risque reel — vendre de "
+                "la vol dans une tension qui s'aggrave est le meilleur moyen de perdre gros. Toujours "
+                "borner le risque.",
+                "Un repli rapide de l'IV : c'est le signal que la tension retombe.")
+        elif ivr["rank"] <= 15:
+            add(72, f"Volatilite TRES BON MARCHE ({ivr['rank']}/100)",
+                f"L'IV actuelle ({ivr['iv']}%) est plus basse que {100 - ivr['rank']}% des "
+                f"{ivr.get('years', '?')} dernieres annees ({ivr.get('src')}). "
+                f"Bornes historiques : {ivr.get('lo')}% a {ivr.get('hi')}%.",
+                "Concretement : l'optionalite est peu chere. Se couvrir coute peu, et prendre du levier "
+                "via des options est plus interessant que d'habitude. C'est le moment de payer pour de "
+                "la protection, pas d'en vendre. Rappel : une vol basse n'annonce pas le calme, elle "
+                "signale surtout que le marche ne price aucun risque — ce qui rend les surprises plus "
+                "violentes.",
+                "Un reveil de l'IV : les positions acheteuses de vol deviendraient rapidement gagnantes.")
+
+    # 5) LEVIER EXTREME
+    f = m.get("funding") or {}
+    ann = f.get("annualized_pct")
+    if isinstance(ann, (int, float)) and abs(ann) >= 40:
+        sens = "longs" if ann > 0 else "shorts"
+        oppose = "shorts" if ann > 0 else "longs"
+        add(80, f"Funding EXTREME ({ann:+.0f}% annualise)",
+            f"Les {sens} paient {abs(ann):.0f}% par an aux {oppose} pour tenir leur position. "
+            f"C'est le signe d'un desequilibre marque du levier : le marche est massivement "
+            f"positionne du meme cote.",
+            f"Concretement : porter une position {sens} coute cher chaque jour, ce qui fragilise les "
+            f"mains faibles. Historiquement, ces exces se resorbent soit par une consolidation qui "
+            f"decourage les {sens}, soit par un mouvement brutal qui les liquide. Ce n'est PAS un "
+            f"signal d'entree contrarien immediat (un funding extreme peut durer des semaines en "
+            f"tendance forte), mais c'est une raison de reduire le levier et de se mefier des entrees "
+            f"tardives dans le sens du consensus.",
+            "Une normalisation du funding : le desequilibre se serait purge.")
+
+    # 6) POCHE DE LIQUIDATIONS
+    lm = m.get("liq_map")
+    if lm:
+        for b in (lm.get("above") or []) + (lm.get("below") or []):
+            dist = abs(b["price"] / lm["spot"] - 1) * 100
+            if dist <= 3 and b["musd"] >= 50:
+                dessus = b["price"] > lm["spot"]
+                qui = "shorts" if dessus else "longs"
+                sens = "hausse" if dessus else "baisse"
+                add(78, f"Poche de liquidations a {dist:.1f}% du spot",
+                    f"Environ {b['musd']:,.0f}M$ de positions {qui} seraient liquidees vers "
+                    f"{euro(b['price'])} ({'au-dessus' if dessus else 'en dessous'} du spot). "
+                    f"Estimation basee sur la distribution de levier, pas sur des positions reelles.",
+                    f"Concretement : si le prix atteint cette zone, les liquidations forcees "
+                    f"alimentent le mouvement dans le sens de la {sens} — c'est un accelerateur, pas "
+                    f"un support. Deux implications : cette zone agit comme un aimant (le marche va "
+                    f"souvent chercher la liquidite ou elle se trouve), et c'est le pire endroit pour "
+                    f"placer un stop, car il sera balaye par la cascade. Placer les stops AU-DELA de "
+                    f"la poche, pas dedans.",
+                    "Le passage du prix dans la zone : si elle est traversee sans acceleration, "
+                    "l'estimation etait fausse ou la poche deja purgee.")
+                break
+
+    # 7) FLUX CLIENT MARQUE
+    fs = m.get("flow_summary")
+    if fs and abs(fs.get("net_musd", 0)) >= 20:
+        cote_dealer = fs.get("dealers_options", "?")
+        add(60, f"Flux client net {fs['clients_options']} d'options",
+            f"{fs['net_musd']:+,.1f}M$ de flux client net sur 24h "
+            f"(calls {fs.get('net_call_musd', 0):+,.1f}M$, puts {fs.get('net_put_musd', 0):+,.1f}M$). "
+            f"Les dealers sont donc {cote_dealer} nets. {fs.get('vol_stance', '').capitalize()}.",
+            "Concretement : les dealers prennent toujours le cote oppose au client, puis se couvrent "
+            "sur le spot. Savoir de quel cote ils sont permet d'anticiper leur hedging futur. Si les "
+            "clients achetent massivement des calls, les dealers sont short calls : ils devront "
+            "acheter du spot si le prix monte, ce qui amplifie la hausse.",
+            "Une inversion du flux : le sens du hedging dealer changerait avec.")
+
+    # 8) CHANGEMENTS FORTS DEPUIS HIER
+    for ch in (m.get("changes") or []):
+        if ch["level"] == "fort":
+            add(88, f"CHANGEMENT : {ch['text']}", ch["why"],
+                "Bascule structurelle depuis hier. Toute lecture etablie la veille est a reevaluer : "
+                "le comportement des dealers a change de nature, donc la strategie adaptee aussi.",
+                "La persistance du changement demain : un aller-retour d'un jour est souvent du bruit.")
+
+    out.sort(key=lambda x: -x["score"])
+    return out[:6]
+
+
+
 def detect_changes(asset, m):
     """Renvoie la liste des changements notables vs la veille, triés par gravité.
     [{'level':'fort|moyen|info', 'text':..., 'why':...}]"""
@@ -1840,6 +2093,79 @@ def macro_context():
                 "n_signals": n_sig}
     except Exception:
         return None
+
+# === Bougies de prix (OHLC) ======================================================
+# CRYPTO : Deribit publie l'OHLC du perpetuel en TEMPS REEL et gratuitement
+#   (get_tradingview_chart_data). Resolutions 1m a 1j. C'est la meme donnee que les
+#   graphiques de la plateforme, sans delai.
+# MACRO  : aucun flux intraday gratuit fiable pour les indices/ETF. On utilise donc
+#   les bougies JOURNALIERES de Stooq (fin de seance, fiables) et on assume le
+#   differe. Le prix "spot" affiche ailleurs vient de CBOE (differe 15 min).
+_CANDLE_CACHE = {}
+# Resolutions Deribit disponibles (en minutes). Pas de sous-minute : l'API
+# ne descend pas en dessous de la bougie 1 minute.
+RESOLUTIONS = {"1m": ("1", 1), "5m": ("5", 5), "15m": ("15", 15),
+               "30m": ("30", 30), "1h": ("60", 60), "2h": ("120", 120),
+               "4h": ("240", 240), "12h": ("720", 720), "1j": ("1D", 1440)}
+
+def price_candles(asset, res="1h", bougies=750):
+    """[{t,o,h,l,c}] + metadonnees de fraicheur. Cache court (60s) pour ne pas
+    marteler l'API a chaque rafraichissement de page."""
+    import time as _t
+    cfg = ASSETS.get(asset)
+    if not cfg:
+        return None
+    res = res if res in RESOLUTIONS else "1h"
+    key = (asset, res)
+    now = _t.time()
+    c = _CANDLE_CACHE.get(key)
+    if c and now - c[0] < 60:
+        return c[1]
+    out = None
+    try:
+        if cfg["source"] == "deribit":
+            code, minutes = RESOLUTIONS[res]
+            inst = (f"{asset}_USDC-PERPETUAL" if asset in DERIBIT_LINEAR
+                    else f"{asset}-PERPETUAL")
+            end = int(now * 1000)
+            bougies = max(50, min(bougies, 5000))
+            start = end - bougies * minutes * 60 * 1000
+            r = _deribit_get("public/get_tradingview_chart_data",
+                             instrument_name=inst, start_timestamp=start,
+                             end_timestamp=end, resolution=code)
+            ticks = r.get("ticks") or []
+            if ticks:
+                out = {"res": res, "temps_reel": True,
+                       "source": f"Deribit {inst} (temps reel)",
+                       "bougies": [{"t": ticks[i],
+                                    "o": r["open"][i], "h": r["high"][i],
+                                    "l": r["low"][i], "c": r["close"][i]}
+                                   for i in range(len(ticks))]}
+        else:
+            sym = (cfg.get("cboe") or asset).lower()
+            rr = requests.get(f"https://stooq.com/q/d/l/?s={sym}.us&i=d", timeout=10,
+                              headers={"User-Agent": "Mozilla/5.0"})
+            if rr.status_code == 200 and "Date" in rr.text[:60]:
+                rows = [l.split(",") for l in rr.text.strip().splitlines()[1:] if l]
+                b = []
+                for x in rows[-bougies:]:
+                    if len(x) >= 5:
+                        try:
+                            ts = int(dt.datetime.strptime(x[0], "%Y-%m-%d")
+                                     .replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
+                            b.append({"t": ts, "o": float(x[1]), "h": float(x[2]),
+                                      "l": float(x[3]), "c": float(x[4])})
+                        except ValueError:
+                            continue
+                if b:
+                    out = {"res": "1j", "temps_reel": False,
+                           "source": "Stooq (bougies journalieres, fin de seance)",
+                           "bougies": b}
+    except Exception:
+        out = None
+    if out:
+        _CANDLE_CACHE[key] = (now, out)
+    return out
 
 # === Volume : options (flux d'attention) + sous-jacent (crédibilité du move) ======
 # Volume d'options : déjà dans le book (Deribit 24h / CBOE séance) -> aucun fetch.
@@ -2318,6 +2644,9 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
                         store=True, horizon=hz, levels=_lvlist,
                         gex_fixed=metrics.get("gex_fixed_musd"),
                         gex_adaptive=metrics.get("gex_adaptive_musd"),
+                        flip=metrics.get("gamma_flip"),
+                        call_wall=(metrics.get("gamma_walls") or {}).get("call_wall"),
+                        put_wall=(metrics.get("gamma_walls") or {}).get("put_wall"),
                         dex_dealer_fixed=metrics.get("dex_dealer_fixed_musd"),
                         dex_dealer_adaptive=metrics.get("dex_dealer_adaptive_musd"))
     # Renvoie les 3 séries (pour basculer dans le dashboard) + celle du profil actif par défaut.
@@ -2364,6 +2693,7 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     save_state(asset, metrics)
     metrics["option_volume"] = option_volume(asset, book)
     metrics["underlying_volume"] = underlying_volume(asset, cfg)
+    metrics["priorities"] = priorities(metrics, asset)   # quoi regarder aujourd'hui
     # Book TOTAL (toutes échéances) : la métrique comparable aux sites publics
     gex_book_tot, _ = gamma_exposure(book, S, csize, signs=signs)
     dex_book_tot = delta_exposure(book, S, csize)

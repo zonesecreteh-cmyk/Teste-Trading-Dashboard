@@ -24,7 +24,7 @@ from scipy.stats import norm
 
 HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
 
-VERSION = "2026-08-26-h"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
+VERSION = "2026-08-26-k"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
 # ---- Convention de signe dealer ---------------------------------------------
 # IMPORTANT : le signe dealer (long/short par type d'option) n'est PAS observable
@@ -2108,7 +2108,7 @@ RESOLUTIONS = {"1m": ("1", 1), "5m": ("5", 5), "15m": ("15", 15),
                "30m": ("30", 30), "1h": ("60", 60), "2h": ("120", 120),
                "4h": ("240", 240), "12h": ("720", 720), "1j": ("1D", 1440)}
 
-def price_candles(asset, res="1h", bougies=750):
+def price_candles(asset, res="1h", bougies=5000):
     """[{t,o,h,l,c}] + metadonnees de fraicheur. Cache court (60s) pour ne pas
     marteler l'API a chaque rafraichissement de page."""
     import time as _t
@@ -2139,7 +2139,8 @@ def price_candles(asset, res="1h", bougies=750):
                        "source": f"Deribit {inst} (temps reel)",
                        "bougies": [{"t": ticks[i],
                                     "o": r["open"][i], "h": r["high"][i],
-                                    "l": r["low"][i], "c": r["close"][i]}
+                                    "l": r["low"][i], "c": r["close"][i],
+                                    "v": (r.get("volume") or [None] * len(ticks))[i]}
                                    for i in range(len(ticks))]}
         else:
             sym = (cfg.get("cboe") or asset).lower()
@@ -2154,7 +2155,8 @@ def price_candles(asset, res="1h", bougies=750):
                             ts = int(dt.datetime.strptime(x[0], "%Y-%m-%d")
                                      .replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
                             b.append({"t": ts, "o": float(x[1]), "h": float(x[2]),
-                                      "l": float(x[3]), "c": float(x[4])})
+                                      "l": float(x[3]), "c": float(x[4]),
+                                      "v": float(x[5]) if len(x) > 5 and x[5] not in ("", "N/D") else None})
                         except ValueError:
                             continue
                 if b:

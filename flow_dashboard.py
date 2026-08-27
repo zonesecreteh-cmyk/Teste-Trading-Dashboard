@@ -4432,6 +4432,14 @@ def _chart_html():
  .rb.active{background:#1b1f2a;color:#00d2ff;border-color:#00d2ff;font-weight:700;}
  .px{font-family:ui-monospace,Consolas,monospace;font-size:20px;font-weight:800;}
  .info{color:#5b6478;font-size:12.5px;}
+ .ind{display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:7px 16px;
+      border-bottom:1px solid #1e222c;background:#0b0e14;flex:0 0 auto;}
+ .ib{cursor:pointer;user-select:none;font-size:12.5px;padding:4px 10px;border-radius:6px;
+     border:1px solid var(--c);color:var(--c);background:color-mix(in srgb, var(--c) 12%, transparent);}
+ .ib.off{border-color:#262b36;color:#3a3f4b;background:transparent;}
+ .ib:hover{filter:brightness(1.25);}
+ .col{width:30px;height:22px;padding:0;border:1px solid #262b36;border-radius:5px;
+      background:#12151d;cursor:pointer;}
  #wrap{flex:1 1 auto;position:relative;min-height:0;}
  #cv{display:block;width:100%;height:100%;cursor:crosshair;}
  #ohlc{position:absolute;left:14px;top:10px;font-family:ui-monospace,Consolas,monospace;
@@ -4439,7 +4447,9 @@ def _chart_html():
        background:rgba(11,13,18,.82);padding:7px 12px;border-radius:8px;
        border:1px solid #1e222c;line-height:1.6;}
  #ohlc .niv{display:block;font-size:14.5px;margin-top:3px;}
- #aide{position:absolute;right:86px;bottom:10px;font-size:11.5px;color:#3a3f4b;pointer-events:none;}
+ #aide{position:absolute;right:14px;top:10px;font-size:11.5px;color:#3a3f4b;
+       pointer-events:none;text-align:right;max-width:280px;line-height:1.5;}
+ #prof{position:absolute;right:0;top:0;bottom:0;width:0;pointer-events:none;}
 </style></head><body>
 <div class="top">
   <h1>\U0001F4C8 GRAPHIQUE</h1>
@@ -4455,19 +4465,57 @@ def _chart_html():
     <a href="/">\u2190 Dashboard</a>
   </span>
 </div>
+<div class="ind">
+  <span style="color:#5b6478;font-size:12.5px;">Indicateurs :</span>
+  <span class="ib" data-k="max_pain"  onclick="basculer('max_pain',this)"  style="--c:#e8a93c">Max pain</span>
+  <span class="ib" data-k="flip"      onclick="basculer('flip',this)"      style="--c:#b48cff">Gamma flip</span>
+  <span class="ib" data-k="call_wall" onclick="basculer('call_wall',this)" style="--c:#3fd07f">Mur call</span>
+  <span class="ib" data-k="put_wall"  onclick="basculer('put_wall',this)"  style="--c:#e0524f">Mur put</span>
+  <span class="ib" data-k="liq"       onclick="basculer('liq',this)"       style="--c:#7c6cff">Liquidations</span>
+  <span class="ib" data-k="profil"    onclick="basculer('profil',this)"    style="--c:#8b949e">Profil GEX</span>
+  <span class="ib" data-k="expiry"    onclick="basculer('expiry',this)"    style="--c:#e8e6e3">\u00c9ch\u00e9ances</span>
+  <span class="ib" data-k="ma"        onclick="basculer('ma',this)"        style="--c:#00d2ff">Moyennes 20/50</span>
+  <span class="ib" data-k="vol"       onclick="basculer('vol',this)"       style="--c:#5b6478">Volume</span>
+  <span class="ib" data-k="em"        onclick="basculer('em',this)"        style="--c:#00d2ff">Expected move</span>
+  <span class="ib" data-k="oi"        onclick="basculer('oi',this)"        style="--c:#e8a93c">Variation OI</span>
+  <span class="ib" data-k="grille"    onclick="basculer('grille',this)"    style="--c:#5b6478">Grille</span>
+  <span style="margin-left:auto;display:flex;gap:9px;align-items:center;color:#5b6478;font-size:12px;">
+    hausse <input type="color" value="#3fd07f" oninput="setStyle('hausse',this.value)" class="col">
+    baisse <input type="color" value="#e0524f" oninput="setStyle('baisse',this.value)" class="col">
+    croix <input type="color" value="#e8e6e3" oninput="setStyle('croix',this.value)" class="col">
+    <span class="ib" style="--c:#5b6478" onclick="razStyle()">\u21ba couleurs</span>
+  </span>
+</div>
 <div id="wrap">
   <canvas id="cv"></canvas>
   <div id="ohlc"></div>
-  <div id="aide">molette = zoom \u00b7 glisser = d\u00e9placer \u00b7 glisser sur l'axe des prix = \u00e9chelle verticale \u00b7 double-clic = ajuster</div>
+  <div id="aide">molette : zoom \u00b7 glisser : d\u00e9placer \u00b7 axe des prix : \u00e9chelle \u00b7 double-clic : ajuster</div>
 </div>
 
 <script>
-const MARGE_D = 60;      // largeur de l'axe des prix, a droite
-const MARGE_B = 26;      // hauteur de l'axe des dates, en bas
+const MARGE_D = 64;      // largeur de l'axe des prix, a droite
+const PROFIL  = 92;      // largeur du profil GEX par strike, colle a l'axe
+const MARGE_B = 30;      // hauteur de l'axe des dates, en bas
 const VIDE    = 12;      // bougies vides apres la derniere : respiration a droite
 const MIN_VUE = 15;
 
 let res='1h', timer=null;
+// Chaque couche est un INDICATEUR activable, comme sur une plateforme.
+// L'etat est memorise dans le navigateur d'une session a l'autre.
+const IND_DEF={max_pain:1, flip:1, call_wall:1, put_wall:1, liq:1, profil:1, ma:0,
+               expiry:1, vol:0, grille:1, em:0, oi:0};
+const STYLE_DEF={hausse:'#3fd07f', baisse:'#e0524f', grille:'#161a22', croix:'#e8e6e3'};
+let STYLE=Object.assign({}, STYLE_DEF);
+try{ const s=localStorage.getItem('flow_style'); if(s) STYLE=Object.assign(STYLE, JSON.parse(s)); }catch(e){}
+function setStyle(k,v){ STYLE[k]=v; try{ localStorage.setItem('flow_style', JSON.stringify(STYLE)); }catch(e){} dessiner(); }
+let IND=Object.assign({}, IND_DEF);
+try{ const s=localStorage.getItem('flow_ind'); if(s) IND=Object.assign(IND, JSON.parse(s)); }catch(e){}
+function basculer(k, el){
+  IND[k]=IND[k]?0:1;
+  if(el) el.classList.toggle('off', !IND[k]);
+  try{ localStorage.setItem('flow_ind', JSON.stringify(IND)); }catch(e){}
+  dessiner();
+}
 let TOUT=[], NIV=[], SRC='', HIST=[];
 // HIST = valeurs des niveaux jour par jour (max pain, flip, murs) telles qu'elles
 // etaient CE JOUR-LA. Elles evoluent : on les trace en escalier le long du temps,
@@ -4523,7 +4571,7 @@ async function charger(){
   }catch(e){ console.error(e); }
   if(!bg){ src.textContent='bougies indisponibles pour cet actif / cette r\u00e9solution'; return; }
 
-  TOUT=bg; SRC=meta;
+  TOUT=bg; SRC=meta; window._lastLevels=d;
   const w=d.gamma_walls||{};
   NIV=[
     {v:d.gamma_flip, c:'#b48cff', t:'Gamma flip'},
@@ -4566,9 +4614,10 @@ function bornesY(vue){
   let lo=Infinity, hi=-Infinity;
   vue.forEach(b=>{ if(!b) return; if(b.l<lo) lo=b.l; if(b.h>hi) hi=b.h; });
   if(!isFinite(lo)||!isFinite(hi)) return [0,1];
-  // les niveaux proches elargissent l'echelle, les lointains sont ignores
-  const amp=(hi-lo)||1;
-  NIV.forEach(n=>{ if(n.v>lo-amp*0.5 && n.v<hi+amp*0.5){ if(n.v<lo) lo=n.v; if(n.v>hi) hi=n.v; } });
+  // l'echelle suit UNIQUEMENT les bougies visibles : un niveau (max pain, mur, poche
+  // de liquidation...) hors champ n'agrandit plus l'echelle, il est epingle en haut/bas
+  // du graphe a la place (cf. epingle() dans dessiner()). Ca evite les sauts d'echelle
+  // quand on zoome/deplace et qu'un niveau lointain entre ou sort de la marge.
   const m=((hi-lo)||1)*0.08;
   return [lo-m, hi+m];
 }
@@ -4594,27 +4643,78 @@ function dessiner(){
   for(let k=0;k<nCol;k++){ const idx=i0+k; vue.push((idx>=0&&idx<TOUT.length)?TOUT[idx]:null); }
   const reelles=vue.filter(Boolean);
   if(!reelles.length) return;
-  const gW=W-MARGE_D, gH=H-MARGE_B;
-  const pas=gW/nCol;
+  const hVol = IND.vol ? Math.round((H-MARGE_B)*0.18) : 0;   // bandeau volume en bas
+  const gW=W-MARGE_D, gH=H-MARGE_B-hVol;
+  const bas=gH+hVol;                    // bas du trace (l'axe des dates est en dessous)
+  const gWc=gW-PROFIL;          // zone des bougies (le profil occupe la droite)
+  const pas=gWc/nCol;
   const [lo,hi]=bornesY(vue);
   const Y=p=>gH-(p-lo)/(hi-lo)*gH;
+
+  // niveau hors echelle : on l'epingle en haut/bas du graphe avec une fleche et sa
+  // valeur (comme TradingView), au lieu de le faire disparaitre purement et simplement.
+  // pinHaut/pinBas decalent les etiquettes empilees pour eviter qu'elles se recouvrent.
+  let pinHaut=0, pinBas=0;
+  function epingle(v, coul, estime){
+    const haut=v>hi;
+    const y = haut ? (9+pinHaut++ *17) : (gH-9-pinBas++ *17);
+    ctx.fillStyle=coul; ctx.fillRect(gW, y-8, MARGE_D, 16);
+    ctx.fillStyle='#0b0d12'; ctx.textAlign='left';
+    ctx.font='bold 11px ui-monospace,Consolas,monospace';
+    ctx.fillText((haut?'▲':'▼')+(estime?'≈':'')+Math.round(v).toLocaleString('fr-FR'), gW+1, y);
+    ctx.font='11.5px ui-monospace,Consolas,monospace';
+  }
 
   // --- grille + axe des prix -------------------------------------------------
   ctx.font='11.5px ui-monospace,Consolas,monospace';
   ctx.textBaseline='middle';
-  const nLignes=6;
-  for(let k=0;k<=nLignes;k++){
-    const p=lo+(hi-lo)*k/nLignes, y=Y(p);
-    ctx.strokeStyle='#161a22'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(gW,y); ctx.stroke();
+  // pas "rond" : 1/2/2.5/5 x puissance de 10, comme sur une plateforme
+  const brut=(hi-lo)/6;
+  const ex=Math.pow(10, Math.floor(Math.log10(brut)));
+  const pasY=[1,2,2.5,5,10].map(v=>v*ex).find(v=>v>=brut)||10*ex;
+  const dec=pasY<1?Math.min(6,Math.ceil(-Math.log10(pasY))):0;
+  for(let p=Math.ceil(lo/pasY)*pasY; p<=hi; p+=pasY){
+    const y=Y(p);
+    if(IND.grille){ ctx.strokeStyle=STYLE.grille; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(gWc,y); ctx.stroke(); }
     ctx.fillStyle='#5b6478'; ctx.textAlign='left';
-    ctx.fillText(Math.round(p).toLocaleString('fr-FR'), gW+7, y);
+    ctx.fillText(p.toLocaleString('fr-FR',{minimumFractionDigits:dec,maximumFractionDigits:dec}), gW+7, y);
   }
   // --- axe des dates ---------------------------------------------------------
-  ctx.textAlign='center'; ctx.fillStyle='#5b6478';
-  const saut=Math.max(1, Math.round(nCol/9));
-  for(let k=0;k<nCol;k+=saut){
-    if(vue[k]) ctx.fillText(fmtDate(vue[k].t), k*pas+pas/2, gH+13);
+  ctx.textAlign='center';
+  const intra=(res!=='1j'&&res!=='12h');
+  let dernierJour=null;
+  const saut=Math.max(1, Math.ceil(nCol/12));
+  for(let k=0;k<nCol;k++){
+    const b=vue[k]; if(!b) continue;
+    const D=new Date(b.t);
+    const jour=D.toISOString().slice(0,10);
+    const nouveauJour=(jour!==dernierJour);
+    if(intra && nouveauJour && dernierJour!==null){
+      if(IND.grille){ ctx.strokeStyle='#20262f'; ctx.lineWidth=1;      // separateur de journee
+        ctx.beginPath(); ctx.moveTo(k*pas,0); ctx.lineTo(k*pas,bas); ctx.stroke(); }
+      ctx.fillStyle='#8b949e'; ctx.font='bold 11.5px ui-monospace,Consolas,monospace';
+      ctx.fillText(D.toLocaleDateString('fr-FR',{day:'2-digit',month:'short'}), k*pas+pas/2, bas+15);
+      ctx.font='11.5px ui-monospace,Consolas,monospace';
+    } else if(k%saut===0){
+      ctx.fillStyle='#5b6478';
+      ctx.fillText(intra ? D.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})
+                         : D.toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'}),
+                   k*pas+pas/2, bas+15);
+    }
+    dernierJour=jour;
+  }
+  if(!intra){                                          // en journalier : mois en repere
+    let dernierMois=null;
+    for(let k=0;k<nCol;k++){
+      const b=vue[k]; if(!b) continue;
+      const M=new Date(b.t).getMonth();
+      if(IND.grille && dernierMois!==null && M!==dernierMois){
+        ctx.strokeStyle='#20262f'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(k*pas,0); ctx.lineTo(k*pas,bas); ctx.stroke();
+      }
+      dernierMois=M;
+    }
   }
 
   // --- bougies ---------------------------------------------------------------
@@ -4623,7 +4723,7 @@ function dessiner(){
     if(!b) return;
     const x=k*pas+pas/2;
     const hausse=b.c>=b.o;
-    ctx.strokeStyle=ctx.fillStyle=hausse?'#3fd07f':'#e0524f';
+    ctx.strokeStyle=ctx.fillStyle=hausse?STYLE.hausse:STYLE.baisse;
     ctx.lineWidth=Math.max(1, pas*0.09);
     ctx.beginPath(); ctx.moveTo(x,Y(b.h)); ctx.lineTo(x,Y(b.l)); ctx.stroke();   // meche
     const y1=Y(b.o), y2=Y(b.c);
@@ -4632,42 +4732,61 @@ function dessiner(){
 
   // --- niveaux EVOLUTIFS : trace en escalier suivant l'historique --------------
   SERIES.forEach(s=>{
+    if(!IND[s.k]) return;                       // indicateur desactive
+    const cur=NIV.find(n=>n.t===s.t);
+    // A-t-on un historique pour ce niveau ? (flip et murs ne sont stockes que depuis
+    // peu : sans repli, la ligne disparaitrait purement et simplement)
+    const aHist=HIST.some(r=>r[s.k]!=null);
     let prev=null, trace=false;
     ctx.strokeStyle=s.c; ctx.lineWidth=1.6; ctx.setLineDash([7,5]);
     ctx.beginPath();
-    for(let k=0;k<nCol;k++){
-      const b=vue[k]; if(!b) continue;
-      const v=valeurDuJour(s.k, b.t);
-      if(v==null||v<lo||v>hi){ prev=null; continue; }
-      const x=k*pas, y=Y(v);
-      if(prev===null){ ctx.moveTo(x,y); }
-      else { ctx.lineTo(x,prev); ctx.lineTo(x,y); }   // marche d'escalier
-      ctx.lineTo(x+pas,y);
-      prev=y; trace=true;
+    if(aHist){
+      for(let k=0;k<nCol;k++){
+        const b=vue[k]; if(!b) continue;
+        let v=valeurDuJour(s.k, b.t);
+        if(v==null) v=(cur?cur.v:null);          // avant le debut de la collecte
+        if(v==null||v<lo||v>hi){ prev=null; continue; }
+        const x=k*pas, y=Y(v);
+        if(prev===null){ ctx.moveTo(x,y); }
+        else { ctx.lineTo(x,prev); ctx.lineTo(x,y); }
+        ctx.lineTo(x+pas,y);
+        prev=y; trace=true;
+      }
+    } else if(cur && cur.v>=lo && cur.v<=hi){
+      const y=Y(cur.v);                          // pas d'historique : ligne horizontale
+      ctx.moveTo(0,y); ctx.lineTo(gWc,y); trace=true;
     }
     if(trace) ctx.stroke();
     ctx.setLineDash([]);
-    // etiquette a droite : la valeur d'AUJOURD'HUI
-    const cur=NIV.find(n=>n.t===s.t);
-    if(cur && cur.v>=lo && cur.v<=hi){
-      const y=Y(cur.v);
-      ctx.fillStyle=s.c; ctx.fillRect(gW, y-8, MARGE_D, 16);
-      ctx.fillStyle='#0b0d12'; ctx.textAlign='left';
-      ctx.font='bold 11px ui-monospace,Consolas,monospace';
-      ctx.fillText(Math.round(cur.v).toLocaleString('fr-FR'), gW+5, y);
-      ctx.font='11.5px ui-monospace,Consolas,monospace';
+    // valeur a afficher : celle du jour si connue, sinon la derniere valeur connue de
+    // l'historique (mur put notamment, qui peut manquer certains jours) marquee ≈
+    const dernier=vue[vue.length-1]||TOUT[TOUT.length-1];
+    const val = (cur && typeof cur.v==='number') ? cur.v
+                : (aHist && dernier ? valeurDuJour(s.k, dernier.t) : null);
+    const estime = val!=null && !(cur && typeof cur.v==='number');
+    if(val!=null){
+      if(val>=lo && val<=hi){
+        const y=Y(val);
+        ctx.fillStyle=s.c; ctx.fillRect(gW, y-8, MARGE_D, 16);
+        ctx.fillStyle='#0b0d12'; ctx.textAlign='left';
+        ctx.font='bold 11px ui-monospace,Consolas,monospace';
+        ctx.fillText((estime?'≈':'')+Math.round(val).toLocaleString('fr-FR'), gW+5, y);
+        ctx.font='11.5px ui-monospace,Consolas,monospace';
+      } else {
+        epingle(val, s.c, estime);              // hors champ : epingle en haut/bas
+      }
     }
   });
 
   // --- poches de liquidations : horizontales (elles n'ont pas d'historique) ----
-  NIV.filter(n=>n.fin).forEach(n=>{
-    if(n.v<lo||n.v>hi) return;
+  if(IND.liq) NIV.filter(n=>n.fin).forEach(n=>{
+    if(n.v<lo||n.v>hi){ epingle(n.v, n.c, false); return; }
     const y=Y(n.v);
     ctx.strokeStyle=n.c;
     ctx.lineWidth = n.fin ? (0.8 + (n.poids||0.4)*2.2) : 1.5;   // poche grosse = trait epais
     ctx.globalAlpha = n.fin ? (0.45 + (n.poids||0.4)*0.55) : 1;
     ctx.setLineDash(n.fin?[2,4]:[7,5]);
-    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(gW,y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(gWc,y); ctx.stroke();
     ctx.setLineDash([]); ctx.globalAlpha=1;
     ctx.fillStyle=n.c; ctx.fillRect(gW, y-8, MARGE_D, 16);
     ctx.fillStyle='#0b0d12'; ctx.textAlign='left'; ctx.font='bold 11px ui-monospace,Consolas,monospace';
@@ -4675,11 +4794,131 @@ function dessiner(){
     ctx.font='11.5px ui-monospace,Consolas,monospace';
   });
 
+  // --- moyennes mobiles -------------------------------------------------------
+  if(IND.ma){
+    [[20,'#00d2ff'],[50,'#ff9f1c']].forEach(([p,col])=>{
+      ctx.strokeStyle=col; ctx.lineWidth=1.4; ctx.beginPath();
+      let start=true;
+      for(let k=0;k<nCol;k++){
+        const idx=i0+k;
+        if(idx<p-1||idx>=TOUT.length) { start=true; continue; }
+        let s=0; for(let z=idx-p+1; z<=idx; z++) s+=TOUT[z].c;
+        const y=Y(s/p);
+        if(y<0||y>gH){ start=true; continue; }
+        const x=k*pas+pas/2;
+        if(start){ ctx.moveTo(x,y); start=false; } else ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    });
+  }
+
+  // --- volume : bandeau sous les bougies --------------------------------------
+  if(IND.vol && hVol>0){
+    const vols=vue.map(b=>b&&b.v!=null?b.v:null).filter(v=>v!=null);
+    const mxV=Math.max(...vols,1);
+    vue.forEach((b,k)=>{
+      if(!b||b.v==null) return;
+      const h=b.v/mxV*(hVol-8);
+      ctx.globalAlpha=.45; ctx.fillStyle=(b.c>=b.o?STYLE.hausse:STYLE.baisse);
+      ctx.fillRect(k*pas+pas*0.16, bas-h, Math.max(1,pas*0.68), h);
+    });
+    ctx.strokeStyle='#161a22'; ctx.beginPath();
+    ctx.moveTo(0,gH); ctx.lineTo(gWc,gH); ctx.stroke();
+    ctx.fillStyle='#3a3f4b'; ctx.textAlign='left';
+    ctx.font='10.5px ui-monospace,Consolas,monospace';
+    ctx.fillText('Volume', 4, gH+12);
+    ctx.font='11.5px ui-monospace,Consolas,monospace';
+  }
+
+  // --- echeances majeures : trait vertical + etiquette -------------------------
+  if(IND.expiry){
+    const cal=((window._lastLevels||{}).expiry_calendar||{}).rows||[];
+    cal.filter(r=>r.gamma_pct>=15).forEach(r=>{
+      const tExp=new Date(r.date+'T08:00:00Z').getTime();
+      for(let k=0;k<nCol-1;k++){
+        const a=vue[k], b2=vue[k+1];
+        if(!a) continue;
+        const tb=b2?b2.t:(a.t+(a.t-(vue[k-1]?vue[k-1].t:a.t)));
+        if(a.t<=tExp && tExp<tb){
+          const x=k*pas+pas/2;
+          ctx.strokeStyle='rgba(232,230,227,.5)'; ctx.lineWidth=1.4; ctx.setLineDash([4,4]);
+          ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,gH); ctx.stroke(); ctx.setLineDash([]);
+          ctx.fillStyle='rgba(232,230,227,.9)'; ctx.textAlign='center';
+          ctx.font='bold 10.5px ui-monospace,Consolas,monospace';
+          ctx.fillText('EXP '+r.gamma_pct+'%', x, 12);
+          ctx.font='11.5px ui-monospace,Consolas,monospace';
+          break;
+        }
+      }
+    });
+  }
+
+  // --- bande d'expected move : amplitude attendue a 1 jour ---------------------
+  const D0=window._lastLevels||{};
+  if(IND.em && D0.expected_move && D0.spot){
+    const p=D0.expected_move.pct;
+    if(typeof p==='number' && p>0){
+      // bornes fournies par le moteur (IV ATM x racine(T)), pas recalculees ici
+      const h1=D0.expected_move.high, b1=D0.expected_move.low;
+      const yH=Y(h1), yB=Y(b1);
+      ctx.fillStyle='rgba(0,210,255,.07)';
+      ctx.fillRect(0, Math.min(yH,yB), gWc, Math.abs(yB-yH));
+      ctx.strokeStyle='rgba(0,210,255,.45)'; ctx.lineWidth=1; ctx.setLineDash([3,5]);
+      [yH,yB].forEach(y=>{ if(y>=0&&y<=gH){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(gWc,y); ctx.stroke(); } });
+      ctx.setLineDash([]);
+      ctx.fillStyle='rgba(0,210,255,.75)'; ctx.textAlign='left';
+      ctx.font='10.5px ui-monospace,Consolas,monospace';
+      if(yH>=10&&yH<=gH) ctx.fillText('expected move \u00b1'+p.toFixed(2)+'%', 6, yH-5);
+      ctx.font='11.5px ui-monospace,Consolas,monospace';
+    }
+  }
+
+  // --- variation d'OI par strike (ce qui s'est construit / denoue depuis hier) --
+  if(IND.oi && D0.oi_change_24h && D0.oi_change_24h.status==='ok'){
+    const tops=D0.oi_change_24h.top||[];
+    const mxO=Math.max(...tops.map(t=>Math.abs(t.doi)),1);
+    tops.forEach(t=>{
+      if(t.strike<lo||t.strike>hi) return;
+      const y=Y(t.strike);
+      const w=Math.abs(t.doi)/mxO*(PROFIL-8);
+      ctx.globalAlpha=.75;
+      ctx.fillStyle = t.doi>=0 ? '#e8a93c' : '#7c6cff';   // build / unwind
+      ctx.fillRect(gWc+4, y-2, w, 4);
+      ctx.globalAlpha=1;
+    });
+  }
+
+  // --- profil GEX par strike : ou sont reellement les options ------------------
+  // Donnee deja calculee par le moteur (gex_by_strike). C'est l'equivalent d'un
+  // profil de volume : on voit d'un coup d'oeil les strikes qui concentrent le
+  // gamma, donc les niveaux ou le hedging dealer sera le plus intense.
+  const prof=IND.profil?((window._lastLevels&&window._lastLevels.gex_by_strike)||[]):[];
+  if(prof.length){
+    const dans=prof.filter(s=>s.strike>=lo&&s.strike<=hi&&Math.abs(s.gex_musd)>0);
+    if(dans.length){
+      const mx=Math.max(...dans.map(s=>Math.abs(s.gex_musd)))||1;
+      const hBar=Math.max(2, Math.min(9, gH/Math.max(dans.length,1)*0.7));
+      dans.forEach(s=>{
+        const y=Y(s.strike);
+        const w=Math.abs(s.gex_musd)/mx*(PROFIL-8);
+        ctx.fillStyle = s.gex_musd>=0 ? 'rgba(63,208,127,.42)' : 'rgba(224,82,79,.42)';
+        ctx.fillRect(gWc+4, y-hBar/2, w, hBar);
+      });
+      ctx.fillStyle='#0d1017'; ctx.fillRect(gWc+1,0,PROFIL-1,17);
+      ctx.fillStyle='#8b949e'; ctx.textAlign='left';
+      ctx.font='bold 10.5px ui-monospace,Consolas,monospace';
+      ctx.fillText('GEX par strike', gWc+5, 11);
+      ctx.font='11.5px ui-monospace,Consolas,monospace';
+      ctx.strokeStyle='#161a22'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(gWc,0); ctx.lineTo(gWc,gH); ctx.stroke();
+    }
+  }
+
   // --- prix courant : etiquette pleine ---------------------------------------
   const der=reelles[reelles.length-1];
   if(der && der.c>=lo&&der.c<=hi){
     const y=Y(der.c), hausse=der.c>=der.o;
-    ctx.fillStyle=hausse?'#3fd07f':'#e0524f';
+    ctx.fillStyle=hausse?STYLE.hausse:STYLE.baisse;
     ctx.fillRect(gW, y-9, MARGE_D, 18);
     ctx.fillStyle='#0b0d12'; ctx.textAlign='left'; ctx.font='bold 11.5px ui-monospace,Consolas,monospace';
     ctx.fillText(Math.round(der.c).toLocaleString('fr-FR'), gW+5, y);
@@ -4688,8 +4927,8 @@ function dessiner(){
   // --- crosshair + lecture ---------------------------------------------------
   const info=document.getElementById('ohlc');
   if(souris && souris.x<gW && souris.y<gH){
-    ctx.strokeStyle='#3a3f4b'; ctx.lineWidth=1; ctx.setLineDash([3,3]);
-    ctx.beginPath(); ctx.moveTo(souris.x,0); ctx.lineTo(souris.x,gH); ctx.stroke();
+    ctx.strokeStyle=STYLE.croix; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(souris.x,0); ctx.lineTo(souris.x,bas); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(0,souris.y); ctx.lineTo(gW,souris.y); ctx.stroke();
     ctx.setLineDash([]);
     const pCur=lo+(gH-souris.y)/gH*(hi-lo);
@@ -4709,6 +4948,15 @@ function dessiner(){
         +'C <b style="color:'+c+'">'+b.c.toLocaleString('fr-FR')+'</b>';
     }
     // libelle du niveau UNIQUEMENT si le curseur est proche du trait
+    const pCur2=lo+(gH-souris.y)/gH*(hi-lo);
+    const st=(window._lastLevels&&window._lastLevels.gex_by_strike)||[];
+    const stProche=st.filter(s=>Math.abs(Y(s.strike)-souris.y)<6&&Math.abs(s.gex_musd)>0)
+                     .sort((a,b)=>Math.abs(b.gex_musd)-Math.abs(a.gex_musd))[0];
+    if(stProche){
+      txt+='<span class="niv" style="color:'+(stProche.gex_musd>=0?'#3fd07f':'#e0524f')+'">'
+        +'\u25ac Strike '+Math.round(stProche.strike).toLocaleString('fr-FR')
+        +' \u00b7 GEX '+(stProche.gex_musd>=0?'+':'')+stProche.gex_musd+'M$</span>';
+    }
     const proche=NIV.filter(n=>n.v>=lo&&n.v<=hi&&Math.abs(Y(n.v)-souris.y)<8);
     if(proche.length){
       txt+=proche.map(n=>'<span class="niv" style="color:'+n.c+'">\u25ac '+n.t
@@ -4779,6 +5027,20 @@ function boucle(){
   if(timer) clearInterval(timer);
   timer=setInterval(()=>{ if(document.getElementById('auto').checked) charger(); }, 60000);
 }
+function razStyle(){
+  STYLE=Object.assign({}, STYLE_DEF);
+  try{ localStorage.removeItem('flow_style'); }catch(e){}
+  document.querySelectorAll('.col').forEach((c,i)=>{
+    c.value=[STYLE_DEF.hausse, STYLE_DEF.baisse, STYLE_DEF.croix][i];
+  });
+  dessiner();
+}
+document.querySelectorAll('.ib').forEach(b=>{
+  if(b.dataset.k && !IND[b.dataset.k]) b.classList.add('off');
+});
+document.querySelectorAll('.col').forEach((c,i)=>{
+  c.value=[STYLE.hausse, STYLE.baisse, STYLE.croix][i];
+});
 charger(); boucle();
 </script>
 </body></html>"""

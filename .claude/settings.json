@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -c ' *)",
+      "Bash(node --check _chart_check.js)",
+      "Bash(rm -f _chart_check.js)",
+      "Bash(tasklist //FI \"IMAGENAME eq python.exe\" //FI \"IMAGENAME eq pythonw.exe\")",
+      "Bash(py -c \"import socket; s=socket.socket\\(\\); print\\('port 8000 in use:', s.connect_ex\\(\\('127.0.0.1',8000\\)\\)==0\\)\")",
+      "Bash(py flow_dashboard.py)",
+      "Bash(disown)"
+    ]
+  }
+}

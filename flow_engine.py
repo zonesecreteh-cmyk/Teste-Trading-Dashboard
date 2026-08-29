@@ -499,6 +499,54 @@ def scenario_matrix(book, S, csize, moves=(-0.10, -0.05, -0.02, 0.0, 0.02, 0.05,
     return out
 
 
+# Historique quotidien de la matrice de scénarios (flow de hedge par mouvement de spot),
+# par horizon. Mêmes points que le défaut de scenario_matrix() ; 1 ligne/jour, alignée par
+# INDICE (pas par valeur de move_pct) avec scenario_matrix() côté dashboard, pour tracer
+# l'évolution jour après jour de chaque niveau (-10 %, -5 %, ... +10 %).
+SCENARIO_MOVES = (-10.0, -5.0, -2.0, 0.0, 2.0, 5.0, 10.0)
+
+def _scenario_hist_path(asset, horizon):
+    return os.path.join(HIST_DIR, f"{asset}_{horizon}_scenario.csv")
+
+def scenario_history(asset, horizon, matrix=None, store=False):
+    """[{date, moves:[{move_pct, flow_musd}, ...]}] pour tracer chaque niveau de la
+    matrice de scénarios dans le temps. store=False = lecture seule. Seul daily.py écrit.
+    Écriture atomique (fichier temporaire + remplacement) pour éviter qu'une lecture
+    concurrente (dashboard ouvert pendant le run quotidien) ne tombe sur un fichier
+    à moitié réécrit."""
+    path = _scenario_hist_path(asset, horizon)
+    today = dt.date.today().isoformat()
+    hist = []
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8"):
+            p = line.strip().split(",")
+            if len(p) < 1 + len(SCENARIO_MOVES):
+                continue
+            moves = [{"move_pct": mv, "flow_musd": (float(p[1 + i]) if p[1 + i] not in ("", "None") else None)}
+                      for i, mv in enumerate(SCENARIO_MOVES)]
+            hist.append({"date": p[0], "moves": moves})
+    if not store or matrix is None:
+        return hist[-90:]
+    by_move = {r["move_pct"]: r["flow_musd"] for r in matrix}
+    point_moves = [{"move_pct": mv, "flow_musd": by_move.get(mv)} for mv in SCENARIO_MOVES]
+    def _line(date, moves):
+        vals = ",".join("" if m["flow_musd"] is None else str(m["flow_musd"]) for m in moves)
+        return f"{date},{vals}\n"
+    os.makedirs(HIST_DIR, exist_ok=True)
+    if not hist or hist[-1]["date"] != today:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_line(today, point_moves))
+        hist.append({"date": today, "moves": point_moves})
+    else:
+        hist[-1] = {"date": today, "moves": point_moves}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for h in hist:
+                f.write(_line(h["date"], h["moves"]))
+        os.replace(tmp, path)
+    return hist[-90:]
+
+
 def delta_exposure(book, S, csize):
     # DEX "POSITIONNEMENT" : delta net agrégé du book, le delta porte déjà son signe
     # (call >0, put <0). PAS de signe dealer ici -> lecture directionnelle du marché.
@@ -2137,6 +2185,7 @@ def price_candles(asset, res="1h", bougies=5000):
             if ticks:
                 out = {"res": res, "temps_reel": True,
                        "source": f"Deribit {inst} (temps reel)",
+                       "instrument": inst,   # nom exact pour s'abonner au flux WebSocket live
                        "bougies": [{"t": ticks[i],
                                     "o": r["open"][i], "h": r["high"][i],
                                     "l": r["low"][i], "c": r["close"][i],
@@ -2660,6 +2709,15 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     metrics["charm_musd"] = round(charm_d / 1e6, 1)
     metrics["vanna_musd"] = round(vanna_1 / 1e6, 1)
     metrics["scenario_matrix"] = scenario_matrix(book_dte, S, csize, signs=signs)
+    if store_history:
+        scenario_history(asset, hz, metrics["scenario_matrix"], store=True)
+    metrics["scenario_history"] = scenario_history(asset, hz, store=False)
+    # Version dense (pas de 0.5 %, -15 % a +15 %) pour l'habillage en zones sur /chart :
+    # meme mecanique de hedge que scenario_matrix, juste beaucoup plus de points pour un
+    # degrade continu (zones d'achat/vente) au lieu d'un tableau a 7 lignes.
+    metrics["hedge_flow_curve"] = scenario_matrix(
+        book_dte, S, csize, signs=signs,
+        moves=tuple(round(i * 0.005, 4) for i in range(-30, 31)))
     metrics["iv30"] = atm30
 
     # --- Indicateur de confiance (qualité des données) ---

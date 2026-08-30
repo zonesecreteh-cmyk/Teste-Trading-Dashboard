@@ -1433,6 +1433,93 @@ def dvol_history(currency, years=3):
         pass
     return rows
 
+# --- Flux ETF spot Bitcoin (créations/rachats des ETF US) ------------------------
+# Contrairement au GEX/DEX (calculé par nous), c'est une donnée qu'on ne peut QUE
+# récupérer ailleurs : personne ne publie d'API officielle et gratuite des flux
+# ETF. TFTC republie en JSON ouvert (CC BY 4.0, attribution requise) l'agrégat
+# quotidien SoSoValue + le détail par fonds compilé par Farside Investors depuis
+# le lancement (11/01/2024). Cache disque, un seul appel réseau par jour.
+def _etf_flows_path():
+    return os.path.join(HIST_DIR, "BTC_etf_flows.json")
+
+def etf_btc_flows():
+    """Statistiques de flux ETF spot BTC : flux du jour, percentile (parmi les jours
+    de même sens : sortie vs sortie, entrée vs entrée), cumuls 5j/20j avec percentile
+    glissant, plus grosses entrées/sorties de l'historique dispo, série pour graphique.
+    None si la source est injoignable et qu'aucun cache n'existe encore."""
+    path = _etf_flows_path()
+    today = dt.date.today().isoformat()
+    cached = None
+    try:
+        with open(path, encoding="utf-8") as f:
+            cached = json.load(f)
+    except Exception:
+        cached = None
+    if not (cached and cached.get("fetched_date") == today):
+        try:
+            r = requests.get("https://www.tftc.io/bitcoin-etf-flows/data.json", timeout=15,
+                              headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                data = r.json()
+                cached = {"fetched_date": today, "days": data.get("days") or []}
+                os.makedirs(HIST_DIR, exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(cached, f)
+        except Exception:
+            pass
+    if not cached or not cached.get("days"):
+        return None
+
+    days = [d for d in cached["days"] if d.get("netFlowUsd") is not None]
+    if not days:
+        return None
+    days.sort(key=lambda d: d["date"])
+
+    today_row = days[-1]
+    flux_jour = today_row["netFlowUsd"]
+    encours = today_row.get("totalNetAssetsUsd")
+    pct_encours = round(100 * flux_jour / encours, 2) if encours else None
+
+    # percentile : ou se situe le flux du jour parmi tous les jours DE MEME SENS
+    # (sortie comparee aux sorties, entree comparee aux entrees) -- 100 = le plus
+    # extreme de son cote, jamais vu d'aussi gros.
+    memes_signe = [d["netFlowUsd"] for d in days[:-1] if (d["netFlowUsd"] < 0) == (flux_jour < 0)]
+    if memes_signe:
+        rang = sum(1 for v in memes_signe if abs(v) <= abs(flux_jour))
+        percentile = round(100 * rang / len(memes_signe))
+    else:
+        percentile = None
+
+    def cumul(n):
+        if len(days) < n:
+            return None, None
+        total = sum(d["netFlowUsd"] for d in days[-n:])
+        roulants = [sum(d["netFlowUsd"] for d in days[i - n:i]) for i in range(n, len(days) + 1)]
+        rang = sum(1 for v in roulants if v <= total)
+        pct = round(100 * rang / len(roulants)) if roulants else None
+        return round(total / 1e6, 1), pct
+
+    cumul5, cumul5_pct = cumul(5)
+    cumul20, cumul20_pct = cumul(20)
+
+    tries = sorted(days, key=lambda d: d["netFlowUsd"])
+    plus_sorties = [{"date": d["date"], "musd": round(d["netFlowUsd"] / 1e6, 1)} for d in tries[:3]]
+    plus_entrees = [{"date": d["date"], "musd": round(d["netFlowUsd"] / 1e6, 1)} for d in tries[-3:][::-1]]
+    serie = [{"date": d["date"], "musd": round(d["netFlowUsd"] / 1e6, 1)} for d in days[-90:]]
+
+    return {
+        "flux_jour_musd": round(flux_jour / 1e6, 1),
+        "pct_encours": pct_encours,
+        "percentile_jour": percentile,
+        "cumul_5j_musd": cumul5, "cumul_5j_pct": cumul5_pct,
+        "cumul_20j_musd": cumul20, "cumul_20j_pct": cumul20_pct,
+        "plus_entrees": plus_entrees, "plus_sorties": plus_sorties,
+        "serie": serie,
+        "asof": today_row["date"],
+        "nb_jours": len(days),
+        "source": "TFTC (tftc.io/bitcoin-etf-flows) — SoSoValue + Farside Investors, CC BY 4.0",
+    }
+
 # --- Indices de volatilite CBOE : l'equivalent du DVOL pour les actifs macro ------
 # CBOE publie l'historique quotidien de ses indices de vol depuis des decennies.
 # On associe chaque actif macro a son indice de reference pour donner a l'IV
@@ -2740,6 +2827,7 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     metrics["funding_multi"] = (funding_multi(asset, metrics["funding"]) if cfg["source"] == "deribit" else None)
     metrics["coinbase_premium"] = (coinbase_premium(asset, S) if cfg["source"] == "deribit" else None)
     metrics["stablecoins"] = (stablecoins() if cfg["source"] == "deribit" else None)
+    metrics["etf_flows"] = (etf_btc_flows() if asset == "BTC" else None)
     metrics["block_trades"] = (block_trades(asset, S) if cfg["source"] == "deribit" else None)
     record_oi_snapshot(asset, book)                 # photo OI du jour (collecte)
     metrics["oi_change_24h"] = oi_change_24h(asset, book)

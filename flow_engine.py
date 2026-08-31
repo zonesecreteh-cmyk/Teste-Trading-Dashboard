@@ -1505,7 +1505,7 @@ def etf_btc_flows():
     tries = sorted(days, key=lambda d: d["netFlowUsd"])
     plus_sorties = [{"date": d["date"], "musd": round(d["netFlowUsd"] / 1e6, 1)} for d in tries[:3]]
     plus_entrees = [{"date": d["date"], "musd": round(d["netFlowUsd"] / 1e6, 1)} for d in tries[-3:][::-1]]
-    serie = [{"date": d["date"], "musd": round(d["netFlowUsd"] / 1e6, 1)} for d in days[-90:]]
+    serie = [{"date": d["date"], "musd": round(d["netFlowUsd"] / 1e6, 1)} for d in days]
 
     return {
         "flux_jour_musd": round(flux_jour / 1e6, 1),
@@ -1659,90 +1659,553 @@ def futures_basis(currency):
     except Exception:
         return None
 
-# === Heatmap liquidations (Hyperliquid, ESTIMATION) ================================
-# Méthode standard des heatmaps publiques (Coinglass-like) : le volume de chaque bougie
-# 1h (7 jours) est supposé ouvrir des positions à paliers de levier typiques ; on en
-# déduit les niveaux de liquidation, et on RETIRE ceux que le prix a déjà balayés.
-# C'est une ESTIMATION de la densité de levier, pas une mesure de positions réelles.
+# === Heatmap liquidations, GLOBALE multi-exchange (ESTIMATION) =====================
+# Méthode standard des heatmaps publiques (Coinglass-like) : le volume notionnel de
+# chaque bougie 1h (7 jours) est supposé ouvrir des positions à paliers de levier
+# typiques ; on en déduit les niveaux de liquidation, et on RETIRE ceux que le prix a
+# déjà balayés. C'est une ESTIMATION de la densité de levier, pas une mesure de
+# positions réelles. global_liq_map() agrège le volume notionnel de Binance + Bybit +
+# OKX + Deribit + Hyperliquid (au lieu d'un seul exchange) pour approcher "tout le marché" plutôt
+# que la seule liquidité d'une plateforme — chaque exchange est best-effort, un
+# exchange absent/indispo pour l'actif est simplement ignoré (jamais bloquant).
 _HL_CACHE = {}
+_GLM_CACHE = {}
 _HL_LEVERAGE = {5: 0.15, 10: 0.30, 25: 0.30, 50: 0.20, 100: 0.05}   # distribution supposée
 
+def _sig_round(x, sig=5):
+    """Arrondit à N chiffres significatifs (pas N décimales) : round(price) tout court
+    écrase à 0 les actifs sous 1$ (ex. TRX à 0.33$). Marche pour tous les ordres de
+    grandeur, de TRX (0.33) à BTC (78914)."""
+    if not x:
+        return 0.0
+    d = sig - int(math.floor(math.log10(abs(x)))) - 1
+    return round(x, d)
+
+def _leverage_liq_buckets(closes, highs, lows, notionals, band, bucket_pct):
+    """Coeur du calcul (partagé par hyperliquid_liq_map et global_liq_map) : à partir
+    d'une série horaire (close/high/low/volume notionnel $), déduit les poches de
+    liquidation estimées au-dessus et en dessous du spot. None si série trop courte."""
+    n = len(closes)
+    if n < 24:
+        return None
+    spot = closes[-1]
+    # suffixes : extrêmes atteints APRÈS chaque bougie (pour retirer les niveaux balayés)
+    smin = [0.0] * n
+    smax = [0.0] * n
+    cur_min, cur_max = float("inf"), 0.0
+    for i in range(n - 1, -1, -1):
+        smin[i], smax[i] = cur_min, cur_max
+        cur_min = min(cur_min, lows[i])
+        cur_max = max(cur_max, highs[i])
+    lo_b, hi_b = spot * (1 - band), spot * (1 + band)
+    step = spot * bucket_pct
+    buckets = {}
+    for i in range(n):
+        notional = notionals[i]
+        if notional <= 0:
+            continue
+        age_w = 0.5 + 0.5 * (i + 1) / n           # les bougies récentes pèsent plus
+        for lev, w in _HL_LEVERAGE.items():
+            amt = notional * w * age_w * 0.5       # moitié longs, moitié shorts
+            liq_l = closes[i] * (1 - 1.0 / lev)    # liquidation des longs (dessous)
+            if lo_b <= liq_l < spot and not (smin[i] <= liq_l):
+                k = round(liq_l / step)
+                b = buckets.setdefault(k, [0.0, 0.0])
+                b[0] += amt
+            liq_s = closes[i] * (1 + 1.0 / lev)    # liquidation des shorts (dessus)
+            if spot < liq_s <= hi_b and not (smax[i] >= liq_s):
+                k = round(liq_s / step)
+                b = buckets.setdefault(k, [0.0, 0.0])
+                b[1] += amt
+    below, above = [], []
+    for k, (l_amt, s_amt) in buckets.items():
+        price = k * step
+        if l_amt > 0 and price < spot:
+            below.append({"price": _sig_round(price), "musd": round(l_amt / 1e6, 1)})
+        if s_amt > 0 and price > spot:
+            above.append({"price": _sig_round(price), "musd": round(s_amt / 1e6, 1)})
+    below.sort(key=lambda b: b["musd"], reverse=True)
+    above.sort(key=lambda b: b["musd"], reverse=True)
+    below, above = below[:10], above[:10]
+    below.sort(key=lambda b: b["price"], reverse=True)
+    above.sort(key=lambda b: b["price"], reverse=True)
+    return {"spot": round(spot, 2),
+            "above": above, "below": below,
+            "total_above_musd": round(sum(b["musd"] for b in above), 1),
+            "total_below_musd": round(sum(b["musd"] for b in below), 1)}
+
 def hyperliquid_liq_map(coin, band=0.25, bucket_pct=0.01):
-    """Zones estimées de liquidations longs (sous le spot) et shorts (au-dessus).
-    Cache 5 min. None si Hyperliquid indispo ou coin absent (carte masquée)."""
+    """Zones estimées de liquidations longs (sous le spot) et shorts (au-dessus),
+    basées sur le seul volume Hyperliquid. Cache 5 min. None si Hyperliquid indispo ou
+    coin absent (carte masquée). Utilisée en repli par global_liq_map()."""
     import time as _t
     now = _t.time()
     c = _HL_CACHE.get(coin)
     if c and now - c[0] < 300:
         return c[1]
     try:
-        import time as _t2
-        end = int(_t2.time() * 1000)
-        start = end - 7 * 24 * 3600 * 1000
-        r = requests.post("https://api.hyperliquid.xyz/info",
-                          json={"type": "candleSnapshot",
-                                "req": {"coin": coin, "interval": "1h",
-                                        "startTime": start, "endTime": end}},
-                          timeout=8, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code != 200:
+        candles = _klines_hyperliquid_raw(coin)
+        if not candles or len(candles) < 24:
             return None
-        candles = r.json()
-        if not isinstance(candles, list) or len(candles) < 24:
-            return None
-        n = len(candles)
         closes = [float(cd["c"]) for cd in candles]
         lows = [float(cd["l"]) for cd in candles]
         highs = [float(cd["h"]) for cd in candles]
-        vols = [float(cd["v"]) for cd in candles]
-        spot = closes[-1]
-        # suffixes : extrêmes atteints APRÈS chaque bougie (pour retirer les niveaux balayés)
-        smin = [0.0] * n
-        smax = [0.0] * n
-        cur_min, cur_max = float("inf"), 0.0
-        for i in range(n - 1, -1, -1):
-            smin[i], smax[i] = cur_min, cur_max
-            cur_min = min(cur_min, lows[i])
-            cur_max = max(cur_max, highs[i])
-        lo_b, hi_b = spot * (1 - band), spot * (1 + band)
-        step = spot * bucket_pct
-        buckets = {}
-        for i in range(n):
-            notional = vols[i] * closes[i]
-            if notional <= 0:
-                continue
-            age_w = 0.5 + 0.5 * (i + 1) / n           # les bougies récentes pèsent plus
-            for lev, w in _HL_LEVERAGE.items():
-                amt = notional * w * age_w * 0.5       # moitié longs, moitié shorts
-                liq_l = closes[i] * (1 - 1.0 / lev)    # liquidation des longs (dessous)
-                if lo_b <= liq_l < spot and not (smin[i] <= liq_l):
-                    k = round(liq_l / step)
-                    b = buckets.setdefault(k, [0.0, 0.0])
-                    b[0] += amt
-                liq_s = closes[i] * (1 + 1.0 / lev)    # liquidation des shorts (dessus)
-                if spot < liq_s <= hi_b and not (smax[i] >= liq_s):
-                    k = round(liq_s / step)
-                    b = buckets.setdefault(k, [0.0, 0.0])
-                    b[1] += amt
-        below, above = [], []
-        for k, (l_amt, s_amt) in buckets.items():
-            price = k * step
-            if l_amt > 0 and price < spot:
-                below.append({"price": round(price), "musd": round(l_amt / 1e6, 1)})
-            if s_amt > 0 and price > spot:
-                above.append({"price": round(price), "musd": round(s_amt / 1e6, 1)})
-        below.sort(key=lambda b: b["musd"], reverse=True)
-        above.sort(key=lambda b: b["musd"], reverse=True)
-        below, above = below[:6], above[:6]
-        below.sort(key=lambda b: b["price"], reverse=True)
-        above.sort(key=lambda b: b["price"], reverse=True)
-        out = {"spot": round(spot, 2),
-               "above": above, "below": below,
-               "total_above_musd": round(sum(b["musd"] for b in above), 1),
-               "total_below_musd": round(sum(b["musd"] for b in below), 1)}
+        notionals = [float(cd["v"]) * float(cd["c"]) for cd in candles]
+        out = _leverage_liq_buckets(closes, highs, lows, notionals, band, bucket_pct)
+        if out:
+            out["sources"] = ["Hyperliquid"]
         _HL_CACHE[coin] = (now, out)
         return out
     except Exception:
         return None
+
+def _klines_hyperliquid_raw(coin):
+    """Bougies 1h/7j Hyperliquid brutes (liste de dicts o/h/l/c/v/t) ou None."""
+    import time as _t2
+    end = int(_t2.time() * 1000)
+    start = end - 7 * 24 * 3600 * 1000
+    r = requests.post("https://api.hyperliquid.xyz/info",
+                      json={"type": "candleSnapshot",
+                            "req": {"coin": coin, "interval": "1h",
+                                    "startTime": start, "endTime": end}},
+                      timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+    if r.status_code != 200:
+        return None
+    candles = r.json()
+    return candles if isinstance(candles, list) and candles else None
+
+def _hourly_klines_binance(asset):
+    """{ts_ms_horaire: {o,h,l,c,notional}} via Binance futures, ou None."""
+    r = requests.get("https://fapi.binance.com/fapi/v1/klines",
+                      params={"symbol": f"{asset}USDT", "interval": "1h", "limit": 168},
+                      timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+    if r.status_code != 200:
+        return None
+    out = {}
+    for row in r.json():
+        ts = int(row[0]) // 3600000 * 3600000
+        out[ts] = {"o": float(row[1]), "h": float(row[2]), "l": float(row[3]),
+                   "c": float(row[4]), "notional": float(row[7])}
+    return out or None
+
+def _hourly_klines_bybit(asset):
+    """{ts_ms_horaire: {o,h,l,c,notional}} via Bybit linear, ou None."""
+    r = requests.get("https://api.bybit.com/v5/market/kline",
+                      params={"category": "linear", "symbol": f"{asset}USDT",
+                               "interval": "60", "limit": 168},
+                      timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+    if r.status_code != 200:
+        return None
+    lst = (r.json().get("result") or {}).get("list") or []
+    out = {}
+    for row in lst:
+        ts = int(row[0]) // 3600000 * 3600000
+        out[ts] = {"o": float(row[1]), "h": float(row[2]), "l": float(row[3]),
+                   "c": float(row[4]), "notional": float(row[6])}
+    return out or None
+
+def _hourly_klines_okx(asset):
+    """{ts_ms_horaire: {o,h,l,c,notional}} via OKX SWAP, ou None."""
+    r = requests.get("https://www.okx.com/api/v5/market/candles",
+                      params={"instId": f"{asset}-USDT-SWAP", "bar": "1H", "limit": "300"},
+                      timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+    if r.status_code != 200:
+        return None
+    rows = r.json().get("data") or []
+    out = {}
+    for row in rows:
+        ts = int(row[0]) // 3600000 * 3600000
+        c = float(row[4])
+        notional = float(row[7]) if len(row) > 7 else float(row[5]) * c
+        out[ts] = {"o": float(row[1]), "h": float(row[2]), "l": float(row[3]),
+                   "c": c, "notional": notional}
+    return out or None
+
+def _hourly_klines_hyperliquid(asset):
+    """{ts_ms_horaire: {o,h,l,c,notional}} via Hyperliquid, ou None."""
+    candles = _klines_hyperliquid_raw(asset)
+    if not candles:
+        return None
+    out = {}
+    for cd in candles:
+        ts = int(cd["t"]) // 3600000 * 3600000
+        c = float(cd["c"])
+        out[ts] = {"o": float(cd["o"]), "h": float(cd["h"]), "l": float(cd["l"]),
+                   "c": c, "notional": float(cd["v"]) * c}
+    return out or None
+
+def _hourly_klines_deribit(asset):
+    """{ts_ms_horaire: {o,h,l,c,notional}} via le perpétuel Deribit (même instrument
+    que price_candles/le flux WebSocket live du /chart), ou None."""
+    try:
+        inst = f"{asset}_USDC-PERPETUAL" if asset in DERIBIT_LINEAR else f"{asset}-PERPETUAL"
+        import time as _t3
+        end = int(_t3.time() * 1000)
+        start = end - 168 * 3600 * 1000
+        r = _deribit_get("public/get_tradingview_chart_data", instrument_name=inst,
+                         start_timestamp=start, end_timestamp=end, resolution="60")
+        ticks = r.get("ticks") or []
+        if not ticks:
+            return None
+        closes, opens, highs, lows = r["close"], r["open"], r["high"], r["low"]
+        vols = r.get("volume") or [0] * len(ticks)
+        out = {}
+        for i, t in enumerate(ticks):
+            ts = int(t) // 3600000 * 3600000
+            c = float(closes[i])
+            out[ts] = {"o": float(opens[i]), "h": float(highs[i]), "l": float(lows[i]),
+                       "c": c, "notional": float(vols[i] or 0) * c}
+        return out or None
+    except Exception:
+        return None
+
+def global_liq_map(asset, band=0.25, bucket_pct=0.01):
+    """Comme hyperliquid_liq_map, mais la base de volume horaire est la SOMME de
+    Binance + Bybit + OKX + Deribit + Hyperliquid (5 requêtes en parallèle,
+    best-effort par exchange) — pour approcher la liquidité de TOUT le marché, pas
+    une seule plateforme. Retombe sur hyperliquid_liq_map seul si moins de 2
+    exchanges répondent (pas assez large pour être qualifié de "global"). Cache 5 min."""
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+    now = _t.time()
+    c = _GLM_CACHE.get(asset)
+    if c and now - c[0] < 300:
+        return c[1]
+    fetchers = {"Binance": _hourly_klines_binance, "Bybit": _hourly_klines_bybit,
+                "OKX": _hourly_klines_okx, "Deribit": _hourly_klines_deribit,
+                "Hyperliquid": _hourly_klines_hyperliquid}
+    results = {}
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futs = {ex.submit(fn, asset): name for name, fn in fetchers.items()}
+        for f in futs:
+            name = futs[f]
+            try:
+                r = f.result()
+                if r:
+                    results[name] = r
+            except Exception:
+                pass
+    if len(results) < 2:
+        out = hyperliquid_liq_map(asset, band=band, bucket_pct=bucket_pct)
+        _GLM_CACHE[asset] = (now, out)
+        return out
+    all_ts = sorted(set().union(*(set(d.keys()) for d in results.values())))
+    closes, highs, lows, notionals = [], [], [], []
+    for ts in all_ts:
+        pts = [d[ts] for d in results.values() if ts in d]
+        closes.append(sum(p["c"] for p in pts) / len(pts))
+        highs.append(max(p["h"] for p in pts))
+        lows.append(min(p["l"] for p in pts))
+        notionals.append(sum(p["notional"] for p in pts))
+    out = _leverage_liq_buckets(closes, highs, lows, notionals, band, bucket_pct)
+    if out:
+        out["sources"] = sorted(results.keys())
+    _GLM_CACHE[asset] = (now, out)
+    return out
+
+# --- Cycle de vie des poches de liquidation : active / percée / expirée -----------
+# global_liq_map() ne donne qu'un instantané ("voici les poches estimées maintenant").
+# Ici on compare cet instantané à un registre persisté pour savoir, pour CHAQUE poche
+# déjà vue : est-elle toujours là (active), a-t-elle disparu parce que le prix l'a
+# réellement traversée (percée, avec la date exacte via les bougies réelles), ou a-t-
+# elle simplement vieilli hors de la fenêtre glissante 7 jours du modèle sans jamais
+# être atteinte (expirée) ? Une poche ne "disparaît" donc jamais silencieusement.
+def _liq_pockets_path(asset):
+    return os.path.join(HIST_DIR, f"{asset}_liq_pockets.json")
+
+def _corroborating_liq_event(asset, side, price, since_iso, tol=0.01):
+    """Cherche dans le journal des vraies liquidations (alimenté par live_feed.py,
+    OKX+Bybit) un événement proche du prix/côté/date d'une poche donnée pour
+    l'attacher comme preuve. None si live_feed n'a pas encore vu passer d'événement
+    correspondant (pas d'erreur : simple absence de corroboration)."""
+    path = os.path.join(HIST_DIR, f"{asset}_liq_events.jsonl")
+    if not os.path.exists(path):
+        return None
+    want_side = "long" if side == "below" else "short"
+    best = None
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if row.get("side") != want_side or row.get("ts", "") < since_iso:
+                    continue
+                if not row.get("price") or abs(row["price"] / price - 1) > tol:
+                    continue
+                if best is None or row["ts"] < best["ts"]:
+                    best = row
+    except Exception:
+        return None
+    return best
+
+def cvd_series(asset):
+    """Cumulative Volume Delta (tape Bybit, écoute permanente live_feed.py).
+    {'cumulative_musd':float, 'serie':[{ts,cvd_musd}], 'updated':iso} ou None si le
+    listener n'a pas encore de checkpoint (démarrage récent, <5 min) ou est absent."""
+    path = os.path.join(HIST_DIR, f"{asset}_cvd.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def liq_pocket_status(asset, match_tol=0.012, resolved_ttl_days=14):
+    """{'active':[...], 'pierced':[...(10 plus recentes)...], 'expired_count':int,
+    'spot':float}. Relit + met a jour le registre persiste a chaque appel (ecriture
+    atomique). Chaque entree : {side, price, musd, first_seen, last_seen, status,
+    resolved_at, resolved_price}."""
+    cur = global_liq_map(asset)
+    path = _liq_pockets_path(asset)
+    reg = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                reg = json.load(f)
+        except Exception:
+            reg = {}
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    matched_keys = set()
+    if cur:
+        for side in ("above", "below"):
+            for b in cur.get(side) or []:
+                price = b["price"]
+                best_k, best_d = None, match_tol
+                for k, e in reg.items():
+                    if e.get("status") != "active" or e.get("side") != side:
+                        continue
+                    d = abs(price / e["price"] - 1)
+                    if d < best_d:
+                        best_k, best_d = k, d
+                if best_k:
+                    reg[best_k]["price"] = price
+                    reg[best_k]["musd"] = b["musd"]
+                    reg[best_k]["last_seen"] = now_iso
+                    matched_keys.add(best_k)
+                else:
+                    k = f"{side}_{_sig_round(price)}"
+                    if k in reg:                        # collision de cle -> desambigue
+                        k = f"{k}_{now_iso}"
+                    reg[k] = {"side": side, "price": price, "musd": b["musd"],
+                               "first_seen": now_iso, "last_seen": now_iso,
+                               "status": "active", "resolved_at": None,
+                               "resolved_price": None}
+                    matched_keys.add(k)
+    # résoudre les poches actives qui ont disparu de l'estimation courante
+    stale = [k for k, e in reg.items() if e.get("status") == "active" and k not in matched_keys]
+    if stale:
+        candles = price_candles(asset, res="1h", bougies=200)
+        bars = (candles or {}).get("bougies") or []
+        for k in stale:
+            e = reg[k]
+            try:
+                since_ts = dt.datetime.fromisoformat(e["first_seen"]).timestamp() * 1000
+            except Exception:
+                since_ts = 0
+            subset = [c for c in bars if c["t"] >= since_ts]
+            crossed = None
+            if e["side"] == "below":
+                for c in subset:
+                    if c["l"] <= e["price"]:
+                        crossed = c
+                        break
+            else:
+                for c in subset:
+                    if c["h"] >= e["price"]:
+                        crossed = c
+                        break
+            if crossed:
+                e["status"] = "pierced"
+                e["resolved_at"] = dt.datetime.fromtimestamp(crossed["t"] / 1000, dt.timezone.utc).isoformat()
+                e["resolved_price"] = crossed["l"] if e["side"] == "below" else crossed["h"]
+                ev = _corroborating_liq_event(asset, e["side"], e["price"], e["first_seen"])
+                e["event"] = ev
+            else:
+                e["status"] = "expired"
+                e["resolved_at"] = now_iso
+                e["resolved_price"] = None
+    # purge des entrées résolues trop anciennes (limiter la taille du fichier)
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=resolved_ttl_days)
+    to_drop = []
+    for k, e in reg.items():
+        if e.get("status") != "active" and e.get("resolved_at"):
+            try:
+                if dt.datetime.fromisoformat(e["resolved_at"]) < cutoff:
+                    to_drop.append(k)
+            except Exception:
+                pass
+    for k in to_drop:
+        del reg[k]
+    try:
+        os.makedirs(HIST_DIR, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(reg, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+    active = sorted([e for e in reg.values() if e["status"] == "active"], key=lambda e: e["price"])
+    pierced = sorted([e for e in reg.values() if e["status"] == "pierced"],
+                      key=lambda e: e.get("resolved_at") or "", reverse=True)[:10]
+    expired_count = sum(1 for e in reg.values() if e["status"] == "expired")
+    return {"active": active, "pierced": pierced, "expired_count": expired_count,
+            "spot": (cur or {}).get("spot")}
+
+# --- Fear & Greed Index : sentiment global crypto ---------------------------------
+# alternative.me republie cet indice (0 = peur extreme, 100 = avidite extreme),
+# gratuit, sans cle, mis a jour environ une fois par jour. Pas specifique a un actif
+# (c'est un indice de marche crypto global), affiche cote de tous les actifs crypto.
+_FNG_CACHE = {}
+
+def fear_greed_index():
+    """{'value':int, 'label':str, 'hier':int|None, 'serie':[{date,value}]} ou None."""
+    import time as _t
+    now = _t.time()
+    c = _FNG_CACHE.get("fng")
+    if c and now - c[0] < 1800:                    # cache 30 min
+        return c[1]
+    try:
+        r = requests.get("https://api.alternative.me/fng/", params={"limit": 30},
+                          timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return None
+        rows = (r.json() or {}).get("data") or []
+        if not rows:
+            return None
+        serie = [{"date": dt.datetime.fromtimestamp(int(x["timestamp"]), dt.timezone.utc).date().isoformat(),
+                   "value": int(x["value"])} for x in rows]
+        serie.sort(key=lambda x: x["date"])
+        out = {"value": serie[-1]["value"],
+               "label": rows[0].get("value_classification"),
+               "hier": serie[-2]["value"] if len(serie) >= 2 else None,
+               "serie": serie[-14:]}
+        _FNG_CACHE["fng"] = (now, out)
+        return out
+    except Exception:
+        return None
+
+# --- Donnees on-chain Bitcoin : reseau, pas marche -------------------------------
+# mempool.space : gratuit, sans cle. Frais = demande de place dans les blocs (proxy
+# d'activite on-chain / urgence des transferts) ; hashrate = securite du reseau ;
+# ajustement de difficulte = tendance du hashrate a moyen terme. BTC uniquement
+# (mempool.space ne suit que le reseau Bitcoin).
+_ONCHAIN_CACHE = {}
+
+def btc_onchain_stats():
+    """{'fees':{...}, 'hashrate_eh':float, 'difficulty_change_pct':float,
+    'mempool_count':int, 'mempool_vsize_mb':float} ou None.
+    Les 4 endpoints sont independants : lances EN PARALLELE (pas l'un apres l'autre)
+    pour que le pire cas soit ~6s (le plus lent des 4), pas jusqu'a 24-40s cumules
+    si un seul endpoint traine (deja observe : certaines IP de mempool.space peuvent
+    etre lentes/injoignables selon le reseau)."""
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+    now = _t.time()
+    c = _ONCHAIN_CACHE.get("onchain")
+    if c and now - c[0] < 600:                     # cache 10 min
+        return c[1]
+    headers = {"User-Agent": "Mozilla/5.0"}
+    endpoints = {
+        "fees": "https://mempool.space/api/v1/fees/recommended",
+        "hr": "https://mempool.space/api/v1/mining/hashrate/3d",
+        "diff": "https://mempool.space/api/v1/difficulty-adjustment",
+        "mp": "https://mempool.space/api/mempool",
+    }
+    def _get(url):
+        try:
+            r = requests.get(url, timeout=6, headers=headers)
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+    try:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futures = {k: ex.submit(_get, url) for k, url in endpoints.items()}
+            res = {k: f.result() for k, f in futures.items()}
+        fees, hr, diff, mp = res["fees"], res["hr"], res["diff"], res["mp"]
+        if not (fees and hr and diff and mp):
+            return None
+        out = {
+            "fees": {"rapide": fees.get("fastestFee"), "30min": fees.get("halfHourFee"),
+                      "1h": fees.get("hourFee"), "economique": fees.get("economyFee")},
+            "hashrate_eh": round(hr.get("currentHashrate", 0) / 1e18, 1),
+            "difficulty_change_pct": round(diff.get("difficultyChange", 0), 2),
+            "difficulty_days_restants": round((diff.get("remainingTime") or 0) / 1000 / 86400, 1),
+            "mempool_count": mp.get("count"),
+            "mempool_vsize_mb": round((mp.get("vsize") or 0) / 1e6, 1),
+        }
+        _ONCHAIN_CACHE["onchain"] = (now, out)
+        return out
+    except Exception:
+        return None
+
+# --- Open Interest croise : Binance / Bybit / OKX perpetuels ---------------------
+# Complete l'OI options de Deribit avec l'OI des PERPETUELS (le gros du volume/levier
+# crypto se fait sur les perps, pas les options). Chaque endpoint est public, sans
+# cle. Binance/Bybit renvoient l'OI en unites de coin (convertit en $ via le spot
+# qu'on a deja) ; OKX renvoie directement oiUsd.
+_OI_MULTI_CACHE = {}
+
+def cross_exchange_oi(asset, spot):
+    """{'rows':[{ex,oi_musd}], 'total_musd':float} ou None si aucun exchange ne repond.
+    Les 3 exchanges sont interroges EN PARALLELE (independants les uns des autres)."""
+    import time as _t
+    from concurrent.futures import ThreadPoolExecutor
+    now = _t.time()
+    c = _OI_MULTI_CACHE.get(asset)
+    if c and now - c[0] < 600:                     # cache 10 min
+        return c[1]
+    headers = {"User-Agent": "Mozilla/5.0"}
+    sym = f"{asset}USDT"
+
+    def _binance():
+        r = requests.get("https://fapi.binance.com/fapi/v1/openInterest",
+                          params={"symbol": sym}, timeout=6, headers=headers)
+        if r.status_code == 200:
+            oi = float(r.json()["openInterest"])
+            return {"ex": "Binance", "oi_musd": round(oi * spot / 1e6, 1)}
+        return None
+
+    def _bybit():
+        r = requests.get("https://api.bybit.com/v5/market/open-interest",
+                          params={"category": "linear", "symbol": sym,
+                                   "intervalTime": "1h", "limit": 1},
+                          timeout=6, headers=headers)
+        if r.status_code == 200:
+            lst = (r.json().get("result") or {}).get("list") or []
+            if lst:
+                oi = float(lst[0]["openInterest"])
+                return {"ex": "Bybit", "oi_musd": round(oi * spot / 1e6, 1)}
+        return None
+
+    def _okx():
+        r = requests.get("https://www.okx.com/api/v5/public/open-interest",
+                          params={"instType": "SWAP", "instId": f"{asset}-USDT-SWAP"},
+                          timeout=6, headers=headers)
+        if r.status_code == 200:
+            data = r.json().get("data") or []
+            if data:
+                oi_usd = float(data[0]["oiUsd"])
+                return {"ex": "OKX", "oi_musd": round(oi_usd / 1e6, 1)}
+        return None
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futures = [ex.submit(fn) for fn in (_binance, _bybit, _okx)]
+        for f in futures:
+            try:
+                r = f.result()
+                if r:
+                    rows.append(r)
+            except Exception:
+                pass
+    if not rows:
+        return None
+    out = {"rows": rows, "total_musd": round(sum(r["oi_musd"] for r in rows), 1)}
+    _OI_MULTI_CACHE[asset] = (now, out)
+    return out
 
 _TRADES_CACHE = {}
 
@@ -2828,13 +3291,18 @@ def analyse(asset, catalyst_bias=None, dte_days=None, store_history=False, prefe
     metrics["coinbase_premium"] = (coinbase_premium(asset, S) if cfg["source"] == "deribit" else None)
     metrics["stablecoins"] = (stablecoins() if cfg["source"] == "deribit" else None)
     metrics["etf_flows"] = (etf_btc_flows() if asset == "BTC" else None)
+    metrics["fear_greed"] = (fear_greed_index() if cfg["source"] == "deribit" else None)
+    metrics["onchain_btc"] = (btc_onchain_stats() if asset == "BTC" else None)
+    metrics["oi_multi_exchange"] = (cross_exchange_oi(asset, S) if cfg["source"] == "deribit" else None)
     metrics["block_trades"] = (block_trades(asset, S) if cfg["source"] == "deribit" else None)
     record_oi_snapshot(asset, book)                 # photo OI du jour (collecte)
     metrics["oi_change_24h"] = oi_change_24h(asset, book)
     record_tape_snapshot(asset, S)                  # photo tape du jour (collecte, BTC/ETH)
     metrics["tape_signs"] = empirical_signs(asset)  # état du signe empirique (affichage)
     metrics["macro_context"] = macro_context()      # contexte global (mêmes données pour tous)
-    metrics["liq_map"] = (hyperliquid_liq_map(asset) if cfg["source"] == "deribit" else None)
+    metrics["liq_map"] = (global_liq_map(asset) if cfg["source"] == "deribit" else None)
+    metrics["liq_pockets"] = (liq_pocket_status(asset) if cfg["source"] == "deribit" else None)
+    metrics["cvd"] = (cvd_series(asset) if cfg["source"] == "deribit" else None)
     metrics["data_health"] = data_health()
     metrics["flow_summary"] = (flow_summary(asset, S) if cfg["source"] == "deribit" else None)
     metrics["changes"] = detect_changes(asset, metrics)   # vs la veille (avant réécriture de l'état)

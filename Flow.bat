@@ -18,15 +18,33 @@ for /l %%i in (1,1,20) do (
 )
 
 :ouvrir
+rem -- onglet Chrome NORMAL (barre d'adresse, favoris, etc.) sur Flow Engine, EN PLUS
+rem    de la fenetre app ci-dessous -- passe par le handler d'URL par defaut de Windows,
+rem    s'ajoute en onglet dans une fenetre Chrome deja ouverte sans forcer de fenetre --
+start "" "http://localhost:8000"
+
+timeout /t 2 >nul
+
 set "CHROME=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
 if not exist "%CHROME%" set "CHROME=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
 if not exist "%CHROME%" set "CHROME=%LocalAppData%\Google\Chrome\Application\chrome.exe"
 
-if exist "%CHROME%" (
-    rem --app = fenetre dediee sans barre d'adresse
-    rem --user-data-dir = profil separe -> Windows groupe la fenetre sous NOTRE icone
-    start "" "%CHROME%" --app=http://localhost:8000 --window-size=1600,1000 --user-data-dir="%LocalAppData%\FlowEngineApp"
+rem -- app Chrome installee (Chrome > Installer Flow Engine...) : seule methode qui
+rem    garde la bonne icone quand on epingle la fenetre a la barre des taches.
+rem    --silent-launch = empeche en plus l'ouverture redondante de la fenetre de
+rem    demarrage normale du profil "Default" (deja couverte par Google ci-dessus).
+set "CHROMEPROXY=%ProgramFiles%\Google\Chrome\Application\chrome_proxy.exe"
+if not exist "%CHROMEPROXY%" set "CHROMEPROXY=%ProgramFiles(x86)%\Google\Chrome\Application\chrome_proxy.exe"
+if not exist "%CHROMEPROXY%" set "CHROMEPROXY=%LocalAppData%\Google\Chrome\Application\chrome_proxy.exe"
+
+if exist "%CHROMEPROXY%" (
+    start "" "%CHROMEPROXY%" --profile-directory=Default --app-id=fkjkjjjmlkjnchecijdkfolgdhilkejl --silent-launch
 ) else (
-    start "" http://localhost:8000
+    rem -- repli si l'app installee a disparu (desinstallee/reinstallee) --
+    if exist "%CHROME%" (
+        start "" "%CHROME%" --app=http://localhost:8000 --window-size=1600,1000 --user-data-dir="%LocalAppData%\FlowEngineApp"
+    ) else (
+        start "" http://localhost:8000
+    )
 )
 exit

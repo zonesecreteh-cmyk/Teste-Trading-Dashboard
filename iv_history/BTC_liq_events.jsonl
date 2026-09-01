@@ -16,3 +16,17 @@
 {"ts": "2026-08-31T19:57:07.746401+00:00", "exchange": "OKX", "side": "short", "price": 78859.7, "qty": 6.8, "usd": null}
 {"ts": "2026-08-31T20:05:58.618040+00:00", "exchange": "OKX", "side": "short", "price": 78842.9, "qty": 2.97, "usd": null}
 {"ts": "2026-08-31T20:06:08.481623+00:00", "exchange": "OKX", "side": "short", "price": 78879.2, "qty": 1.5, "usd": null}
+{"ts": "2026-08-31T21:03:09.652751+00:00", "exchange": "OKX", "side": "long", "price": 78749.0, "qty": 0.07, "usd": null}
+{"ts": "2026-08-31T21:05:41.790078+00:00", "exchange": "OKX", "side": "long", "price": 78731.2, "qty": 35.33, "usd": null}
+{"ts": "2026-08-31T21:05:42.201012+00:00", "exchange": "OKX", "side": "long", "price": 78718.9, "qty": 4.01, "usd": null}
+{"ts": "2026-08-31T21:05:43.123467+00:00", "exchange": "OKX", "side": "long", "price": 78706.6, "qty": 0.79, "usd": null}
+{"ts": "2026-08-31T21:05:49.029382+00:00", "exchange": "OKX", "side": "long", "price": 78696.7, "qty": 0.11, "usd": null}
+{"ts": "2026-08-31T22:33:51.467484+00:00", "exchange": "OKX", "side": "long", "price": 78663.8, "qty": 0.76, "usd": null}
+{"ts": "2026-08-31T22:33:51.483358+00:00", "exchange": "OKX", "side": "long", "price": 78672.2, "qty": 79.2, "usd": null}
+{"ts": "2026-08-31T22:33:53.236190+00:00", "exchange": "OKX", "side": "long", "price": 78660.4, "qty": 0.27, "usd": null}
+{"ts": "2026-08-31T22:34:12.693293+00:00", "exchange": "OKX", "side": "long", "price": 78649.7, "qty": 13.58, "usd": null}
+{"ts": "2026-08-31T22:37:41.720412+00:00", "exchange": "OKX", "side": "long", "price": 78633.6, "qty": 2.39, "usd": null}
+{"ts": "2026-08-31T22:37:46.585489+00:00", "exchange": "OKX", "side": "long", "price": 78630.8, "qty": 1.77, "usd": null}
+{"ts": "2026-08-31T22:42:31.275212+00:00", "exchange": "OKX", "side": "long", "price": 78620.8, "qty": 0.22, "usd": null}
+{"ts": "2026-08-31T22:43:29.477215+00:00", "exchange": "OKX", "side": "long", "price": 78619.0, "qty": 0.07, "usd": null}
+{"ts": "2026-08-31T22:43:44.045373+00:00", "exchange": "OKX", "side": "long", "price": 78613.7, "qty": 1.02, "usd": null}

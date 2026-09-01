@@ -1953,6 +1953,30 @@ def cvd_series(asset):
     except Exception:
         return None
 
+def liq_events_recent(asset, days=30, limit=500):
+    """Liquidations REELLES (pas estimées) capturées par live_feed.py (OKX+Bybit),
+    pour affichage sur le graphique /chart : [{ts, exchange, side, price, qty, usd}],
+    triées chronologiquement, les plus récentes conservées si plus de `limit`.
+    [] si le journal n'existe pas encore (écoute pas assez ancienne) ou est vide."""
+    path = os.path.join(HIST_DIR, f"{asset}_liq_events.jsonl")
+    if not os.path.exists(path):
+        return []
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+    out = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                    if dt.datetime.fromisoformat(row["ts"]) >= cutoff:
+                        out.append(row)
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    out.sort(key=lambda r: r["ts"])
+    return out[-limit:]
+
 def liq_pocket_status(asset, match_tol=0.012, resolved_ttl_days=14):
     """{'active':[...], 'pierced':[...(10 plus recentes)...], 'expired_count':int,
     'spot':float}. Relit + met a jour le registre persiste a chaque appel (ecriture

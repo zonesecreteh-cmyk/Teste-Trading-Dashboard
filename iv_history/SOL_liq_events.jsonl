@@ -35,3 +35,17 @@
 {"ts": "2026-09-03T21:34:34.336029+00:00", "exchange": "OKX", "side": "short", "price": 105.57, "qty": 47.34, "usd": null}
 {"ts": "2026-09-03T21:34:37.657349+00:00", "exchange": "OKX", "side": "short", "price": 105.61, "qty": 24.16, "usd": null}
 {"ts": "2026-09-03T21:34:38.737392+00:00", "exchange": "OKX", "side": "short", "price": 105.58, "qty": 4.03, "usd": null}
+{"ts": "2026-09-06T11:25:43.860276+00:00", "exchange": "OKX", "side": "short", "price": 106.46, "qty": 25.52, "usd": null}
+{"ts": "2026-09-06T11:42:59.232182+00:00", "exchange": "OKX", "side": "long", "price": 106.23, "qty": 5.62, "usd": null}
+{"ts": "2026-09-06T15:39:19.567184+00:00", "exchange": "OKX", "side": "short", "price": 105.93, "qty": 16.6, "usd": null}
+{"ts": "2026-09-06T16:32:38.593062+00:00", "exchange": "OKX", "side": "short", "price": 106.1, "qty": 15.0, "usd": null}
+{"ts": "2026-09-06T16:40:49.636154+00:00", "exchange": "OKX", "side": "short", "price": 106.3, "qty": 13.38, "usd": null}
+{"ts": "2026-09-06T16:41:58.046509+00:00", "exchange": "OKX", "side": "short", "price": 106.32, "qty": 89.69, "usd": null}
+{"ts": "2026-09-06T17:08:31.014904+00:00", "exchange": "OKX", "side": "long", "price": 105.62, "qty": 1275.35, "usd": null}
+{"ts": "2026-09-06T17:08:41.830510+00:00", "exchange": "OKX", "side": "long", "price": 105.59, "qty": 2.08, "usd": null}
+{"ts": "2026-09-06T17:20:05.441178+00:00", "exchange": "OKX", "side": "short", "price": 106.28, "qty": 2.91, "usd": null}
+{"ts": "2026-09-06T17:20:06.321658+00:00", "exchange": "OKX", "side": "short", "price": 106.38, "qty": 3.84, "usd": null}
+{"ts": "2026-09-06T19:11:02.331347+00:00", "exchange": "OKX", "side": "long", "price": 105.72, "qty": 4.24, "usd": null}
+{"ts": "2026-09-06T19:21:11.641560+00:00", "exchange": "OKX", "side": "long", "price": 105.59, "qty": 13.26, "usd": null}
+{"ts": "2026-09-06T19:22:24.384921+00:00", "exchange": "OKX", "side": "long", "price": 105.5, "qty": 5.39, "usd": null}
+{"ts": "2026-09-06T20:07:26.151046+00:00", "exchange": "OKX", "side": "long", "price": 105.29, "qty": 5.79, "usd": null}

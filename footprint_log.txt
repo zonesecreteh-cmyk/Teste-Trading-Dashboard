@@ -1,0 +1,54 @@
+[collect_footprint] 2026-09-08 23:43 UTC — début
+  BTC: ok
+  ETH: ok
+  SOL: ok
+  XRP: ok
+  AVAX: ok
+  TRX: ok
+  HYPE: ok
+[collect_footprint] terminé
+[collect_footprint] 2026-09-08 23:45 UTC — début
+  BTC: ok
+  ETH: ok
+  SOL: ok
+  XRP: ok
+  AVAX: ok
+  TRX: ok
+  HYPE: ok
+[collect_footprint] terminé
+[collect_footprint] 2026-09-09 11:14 UTC — début
+  BTC: ok
+  ETH: ok
+  SOL: ok
+  XRP: ok
+  AVAX: ok
+  TRX: ok
+  HYPE: ok
+[collect_footprint] terminé
+^C[collect_footprint] 2026-09-09 13:45 UTC — début
+  BTC: ok
+  ETH: ok
+  SOL: ok
+  XRP: ok
+  AVAX: ok
+  TRX: ok
+  HYPE: ok
+[collect_footprint] terminé
+[collect_footprint] 2026-09-09 17:56 UTC — début
+  BTC: ok
+  ETH: ok
+  SOL: ok
+  XRP: ok
+  AVAX: ok
+  TRX: ok
+  HYPE: ok
+[collect_footprint] terminé
+[collect_footprint] 2026-09-09 20:05 UTC — début
+  BTC: ok
+  ETH: ok
+  SOL: ok
+  XRP: ok
+  AVAX: ok
+  TRX: ok
+  HYPE: ok
+[collect_footprint] terminé

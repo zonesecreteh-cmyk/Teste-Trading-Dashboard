@@ -4685,6 +4685,12 @@ def _chart_html():
   <h1>\U0001F4C8 GRAPHIQUE</h1>
   <select id="asset" onchange="charger()">""" + opts + """</select>
   <span style="display:flex;gap:5px;">""" + res_btns + """</span>
+  <span class="rb" id="btnFootprint" onclick="basculerMode()" title="Volume reel par niveau de prix, separe acheteurs/vendeurs (tape reelle, crypto uniquement)">▦ Footprint</span>
+  <span id="fpSrc" style="display:none;gap:4px;align-items:center;">
+    <span class="rb active" data-src="binance" onclick="setFpSource('binance',this)" title="Reference : ~60x le volume de Deribit sur BTC">Binance</span>
+    <span class="rb" data-src="deribit" onclick="setFpSource('deribit',this)" title="Comparaison uniquement, volume bien plus faible">Deribit</span>
+    <span id="fpLivepoint" class="livepoint" title=""></span>
+  </span>
   <span id="prix" class="px"></span>
   <span id="livepoint" class="livepoint" title=""></span>
   <span id="src" class="info"></span>
@@ -4750,6 +4756,119 @@ function basculer(k, el){
   dessiner();
 }
 let TOUT=[], NIV=[], SRC='', HIST=[], LIQEV=[];
+let modeGraphe='bougies', FP=null, fpSource='binance';   // Etape A, ADDENDUM_FOOTPRINT.md
+// Binance en reference par defaut (~60x le volume de Deribit sur BTC, mesure) ;
+// Deribit reste selectionnable pour comparaison ponctuelle, jamais par defaut.
+function fmtK(v){
+  const a=Math.abs(v);
+  if(a>=1e6) return (v/1e6).toFixed(1)+'M';
+  if(a>=1e3) return Math.round(v/1e3)+'K';
+  return Math.round(v);
+}
+async function chargerFootprint(){
+  const a=document.getElementById('asset').value;
+  const src=document.getElementById('src');
+  try{
+    FP = await fetch('/api/footprint/'+encodeURIComponent(a)+'?res='+res+'&heures=6&source='+fpSource).then(r=>r.json());
+    if(!FP) src.textContent='· footprint indisponible (macro, ou aucun trade sur la fenetre)';
+  }catch(e){ FP=null; }
+  dessiner();
+}
+
+// --- Etape C : footprint EN DIRECT, websocket Binance direct depuis le navigateur
+// (ADDENDUM_FOOTPRINT.md 8bis.A) -- le serveur Python n'est PAS dans la boucle du
+// live, seulement pour l'historique. Reconnexion automatique a delai croissant
+// (1s,2s,4s...30s max). Binance uniquement (Deribit reste a la demande, Etape A).
+let fpWs=null, fpWsSymbol=null, fpLiveOK=false, fpReconnectDelay=1000, fpRedrawQueued=false;
+let fpLiveState={barT:null, courant:0};
+
+function majPastilleFpLive(reco){
+  const el=document.getElementById('fpLivepoint');
+  if(!el) return;
+  el.classList.toggle('on', fpLiveOK);
+  el.classList.toggle('reco', !fpLiveOK && !!reco);
+  el.title = fpLiveOK ? 'Footprint en direct (websocket Binance, aggTrade)'
+           : (reco ? 'Reconnexion au footprint live…' : '');
+}
+function fermerFpWS(){
+  if(fpWs){ try{ fpWs.onclose=null; fpWs.close(); }catch(e){} fpWs=null; }
+  fpWsSymbol=null; fpLiveOK=false; majPastilleFpLive(false);
+}
+function ouvrirFpWS(asset){
+  if(fpWs){ try{ fpWs.onclose=null; fpWs.close(); }catch(e){} fpWs=null; }
+  const symbol=asset.toLowerCase()+'usdt';
+  fpWsSymbol=symbol; fpLiveOK=false;
+  let sock;
+  try{ sock=new WebSocket('wss://fstream.binance.com/ws/'+symbol+'@aggTrade'); }catch(e){ return; }
+  fpWs=sock;
+  sock.onopen=()=>{
+    if(fpWs!==sock) return;
+    fpLiveOK=true; fpReconnectDelay=1000; majPastilleFpLive();
+    chargerFootprint();   // recharge l'historique recent en REST pour combler un eventuel trou
+  };
+  sock.onmessage=(ev)=>{
+    if(fpWs!==sock) return;
+    let msg; try{ msg=JSON.parse(ev.data); }catch(e){ return; }
+    if(msg.e!=='aggTrade') return;
+    traiterFpTick(parseFloat(msg.p), parseFloat(msg.q), msg.m?'sell':'buy', msg.T);
+    if(!fpRedrawQueued){ fpRedrawQueued=true; requestAnimationFrame(()=>{ fpRedrawQueued=false; dessiner(); }); }
+  };
+  sock.onclose=()=>{
+    if(fpWs!==sock) return;
+    fpLiveOK=false; majPastilleFpLive(true);
+    // reconnexion SEULEMENT si toujours en mode footprint/Binance sur le meme actif
+    if(modeGraphe==='footprint' && fpSource==='binance' && document.getElementById('asset').value===asset){
+      const d=fpReconnectDelay;
+      setTimeout(()=>{ if(fpWsSymbol===symbol) ouvrirFpWS(asset); }, d);
+      fpReconnectDelay=Math.min(30000, fpReconnectDelay*2);
+    }
+  };
+  sock.onerror=()=>{ try{ sock.close(); }catch(e){} };
+}
+function traiterFpTick(price, qty, side, ts){
+  if(!FP || !FP.pas_prix || !FP.barres) return;
+  const taille=MINUTES_RES[res]*60000, t0=Math.floor(ts/taille)*taille;
+  let bar=FP.barres.length ? FP.barres[FP.barres.length-1] : null;
+  if(!bar || bar.t!==t0){
+    if(bar && t0<bar.t) return;   // tick en retard sur une barre deja close : ignore
+    bar={t:t0, niveaux:[], total_buy:0, total_sell:0, delta:0, poc:null, max_delta:0, min_delta:0};
+    FP.barres.push(bar);
+    fpLiveState={barT:t0, courant:0};
+  }
+  const niveau=Math.round(price/FP.pas_prix)*FP.pas_prix, notional=price*qty;
+  let n=bar.niveaux.find(x=>x.p===niveau);
+  if(!n){ n={p:niveau, buy:0, sell:0, delta:0}; bar.niveaux.push(n); bar.niveaux.sort((a,b)=>b.p-a.p); }
+  if(side==='buy'){ n.buy+=notional; bar.total_buy+=notional; } else { n.sell+=notional; bar.total_sell+=notional; }
+  n.delta=n.buy-n.sell; bar.delta=bar.total_buy-bar.total_sell;
+  let meilleur=null;
+  bar.niveaux.forEach(x=>{ if(!meilleur || (x.buy+x.sell)>(meilleur.buy+meilleur.sell)) meilleur=x; });
+  bar.poc=meilleur?meilleur.p:bar.poc;
+  fpLiveState.courant += (side==='buy'?notional:-notional);
+  if(fpLiveState.courant>bar.max_delta) bar.max_delta=fpLiveState.courant;
+  if(fpLiveState.courant<bar.min_delta) bar.min_delta=fpLiveState.courant;
+}
+
+function setFpSource(s, el){
+  fpSource=s;
+  document.querySelectorAll('#fpSrc .rb').forEach(b=>b.classList.remove('active'));
+  if(el) el.classList.add('active');
+  if(modeGraphe==='footprint'){
+    chargerFootprint();
+    if(fpSource==='binance') ouvrirFpWS(document.getElementById('asset').value); else fermerFpWS();
+  }
+}
+function basculerMode(){
+  modeGraphe = (modeGraphe==='footprint') ? 'bougies' : 'footprint';
+  document.getElementById('btnFootprint').classList.toggle('active', modeGraphe==='footprint');
+  document.getElementById('fpSrc').style.display = (modeGraphe==='footprint') ? 'flex' : 'none';
+  if(modeGraphe==='footprint'){
+    chargerFootprint();
+    if(fpSource==='binance') ouvrirFpWS(document.getElementById('asset').value); else fermerFpWS();
+  } else {
+    fermerFpWS();
+    dessiner();
+  }
+}
 // HIST = valeurs des niveaux jour par jour (max pain, flip, murs) telles qu'elles
 // etaient CE JOUR-LA. Elles evoluent : on les trace en escalier le long du temps,
 // au lieu d'une ligne horizontale figee sur la valeur d'aujourd'hui.
@@ -4850,6 +4969,10 @@ async function charger(){
   pe.style.color=der.c>=prem.o?'#3fd07f':'#e0524f';
   src.textContent='\u00b7 '+SRC;
   dessiner();
+  if(modeGraphe==='footprint'){   // actif/resolution ont change
+    chargerFootprint();
+    if(fpSource==='binance') ouvrirFpWS(a); else fermerFpWS();
+  }
 }
 
 // ---- flux live Deribit : WebSocket public gratuit, sans cle API -------------
@@ -4931,6 +5054,7 @@ function majPrixCourant(){
 }
 
 window.addEventListener('beforeunload', fermerWS);
+window.addEventListener('beforeunload', fermerFpWS);
 
 function bornesY(vue){
   vue=(vue||[]).filter(Boolean);
@@ -4999,7 +5123,7 @@ function dessiner(){
   // (juste deplace tel quel dans une fonction nommee).
   dessinerAxes();
   dessinerZonesHedge();
-  dessinerBougies();
+  if(modeGraphe==='footprint' && FP) dessinerFootprintCells(); else dessinerBougies();
   dessinerLiquidationsReelles();
   dessinerNiveaux();
   dessinerIndicateurs();
@@ -5128,6 +5252,50 @@ function dessiner(){
     const y1=Y(b.o), y2=Y(b.c);
     ctx.fillRect(x-corps/2, Math.min(y1,y2), corps, Math.max(1,Math.abs(y2-y1)));
   });
+  }
+
+  // --- footprint (order flow) : volume REEL par (bougie, palier de prix), tape
+  // Deribit -- ADDENDUM_FOOTPRINT.md Etape A. Remplace les bougies (mode exclusif),
+  // reutilise la meme grille temporelle (vue/pas/nCol) : les niveaux, zones de
+  // hedge et liquidations continuent de s'afficher par-dessus sans rien changer.
+  function dessinerFootprintCells(){
+    if(!FP || !FP.barres || !FP.barres.length || !vue[0]) return;
+    const taille=MINUTES_RES[res]*60000, t0=vue[0].t, pasPrix=FP.pas_prix;
+    const cellPxH=Math.max(1, gH/(hi-lo)*pasPrix);
+    let mx=1;
+    FP.barres.forEach(b=>b.niveaux.forEach(n=>{ const v=n.buy+n.sell; if(v>mx) mx=v; }));
+    FP.barres.forEach(bar=>{
+      const k=Math.round((bar.t-t0)/taille);
+      if(k<0||k>=nCol) return;
+      const xL=k*pas, xR=(k+1)*pas, larg=Math.max(1,xR-xL-2);
+      bar.niveaux.forEach(n=>{
+        if(n.p<lo||n.p>hi) return;
+        const yC=Y(n.p), vol=n.buy+n.sell, inten=Math.min(1,vol/mx);
+        const dom=n.buy>=n.sell;
+        ctx.globalAlpha=0.15+inten*0.55;
+        ctx.fillStyle=dom?STYLE.hausse:STYLE.baisse;
+        ctx.fillRect(xL+1, yC-cellPxH/2, larg, Math.max(1,cellPxH-1));
+        ctx.globalAlpha=1;
+        const estPoc=(bar.poc!=null && Math.abs(n.p-bar.poc)<pasPrix*0.5);
+        if(estPoc){
+          ctx.strokeStyle='#00d2ff'; ctx.lineWidth=1.4;
+          ctx.strokeRect(xL+1, yC-cellPxH/2, larg, Math.max(1,cellPxH-1));
+        }
+        if(pas>54 && cellPxH>11){
+          ctx.fillStyle='#0b0d12'; ctx.textAlign='center';
+          ctx.font='9.5px ui-monospace,Consolas,monospace';
+          ctx.fillText(fmtK(n.sell)+' × '+fmtK(n.buy), (xL+xR)/2, yC);
+          ctx.font='11.5px ui-monospace,Consolas,monospace';
+        }
+      });
+      // delta de la bougie, au-dessus de la colonne
+      if(pas>28){
+        const y0=Y(hi), dCls=bar.delta>=0?STYLE.hausse:STYLE.baisse;
+        ctx.fillStyle=dCls; ctx.textAlign='center'; ctx.font='bold 10px ui-monospace,Consolas,monospace';
+        ctx.fillText((bar.delta>=0?'+':'')+fmtK(bar.delta), (xL+xR)/2, Math.max(10,y0-6));
+        ctx.font='11.5px ui-monospace,Consolas,monospace';
+      }
+    });
   }
 
   // --- vraies liquidations captees en direct (live_feed.py, OKX+Bybit) : petits
@@ -5541,6 +5709,13 @@ class Handler(BaseHTTPRequestHandler):
                        "image/png")
             return
         if path == "/chart":
+            # rattrapage automatique des jours de footprint manquants/provisoires,
+            # en tache de fond (jamais bloquant, ignore silencieusement si un
+            # passage tourne deja) -- ADDENDUM_FOOTPRINT.md Etape B, rattrapage auto
+            try:
+                fe.start_footprint_backfill_async()
+            except Exception:
+                pass
             self._send(200, _chart_html().encode("utf-8"), "text/html; charset=utf-8")
             return
         if path == "/chartjs.js":
@@ -5566,6 +5741,28 @@ class Handler(BaseHTTPRequestHandler):
             a = _up.unquote(a).upper()
             try:
                 out = fe.liq_events_recent(a)
+                self._send(200, json.dumps(out).encode(), "application/json")
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
+            return
+        if path.startswith("/api/footprint/"):
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            fp_res, fp_heures, fp_source = "5m", 6, "binance"
+            for kv in qs.split("&"):
+                if kv.startswith("res="):
+                    fp_res = kv[4:]
+                elif kv.startswith("heures="):
+                    try:
+                        fp_heures = max(1, min(24, float(kv[7:])))
+                    except ValueError:
+                        pass
+                elif kv.startswith("source="):
+                    fp_source = kv[7:]
+            a = path.split("/api/footprint/", 1)[1].split("?")[0]
+            import urllib.parse as _up
+            a = _up.unquote(a).upper()
+            try:
+                out = fe.footprint(a, res=fp_res, heures=fp_heures, source=fp_source)
                 self._send(200, json.dumps(out).encode(), "application/json")
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
@@ -5663,6 +5860,10 @@ if __name__ == "__main__":
     threading.Thread(target=open_browser, daemon=True).start()
     if live_feed:
         live_feed.start()
+    try:
+        fe.start_footprint_backfill_async()   # rattrapage auto des jours manquants/provisoires
+    except Exception:
+        pass
     try:
         ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
     except OSError as e:

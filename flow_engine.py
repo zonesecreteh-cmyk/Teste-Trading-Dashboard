@@ -17,7 +17,7 @@ Usage:
 Dépendances: requests, numpy, scipy
 """
 
-import sys, json, math, os, re, datetime as dt
+import sys, json, math, os, re, gzip, threading, datetime as dt
 import requests
 import numpy as np
 from scipy.stats import norm
@@ -2320,6 +2320,600 @@ def flow_summary(asset, ref_price):
     except Exception:
         return None
 
+# === Footprint (order flow) — ADDENDUM_FOOTPRINT.md, Étape A ======================
+# Volume RÉEL par (bougie, palier de prix), séparé acheteurs/vendeurs — lu sur la
+# tape de trades, pas une estimation comme la heatmap de liquidations. Crypto
+# uniquement (macro CBOE n'a pas de tape trade-level gratuite). "À la demande" :
+# pagination REST à chaque appel, cache court, PAS de persistance disque (ça, c'est
+# l'Étape B — le collecteur — volontairement pas encore fait : inutile d'accumuler
+# de l'historique avant d'avoir choisi la bonne source de référence).
+#
+# Source par défaut = BINANCE, pas Deribit. Vérifié : sur BTC, Binance pèse environ
+# 34x le volume notionnel de Deribit perpétuel (mesuré en extrapolant un échantillon
+# de 1000 aggTrades qui ne couvrait en réalité que 4,9 minutes, pas l'heure demandée
+# — Deribit reste disponible comme source secondaire pour comparaison ponctuelle,
+# mais ne doit pas servir de référence par défaut : c'est là qu'est l'essentiel du
+# flux directionnel réel (cf. ADDENDUM_FOOTPRINT.md section 7).
+_FOOTPRINT_CACHE = {}
+
+def _pas_rond(brut):
+    """Palier de prix 'rond' : 1/2/2.5/5 x puissance de 10, comme dessinerAxes()
+    côté /chart — mêmes paliers qu'une vraie plateforme, pas un pas arbitraire."""
+    if brut <= 0:
+        return 1.0
+    ex = 10 ** math.floor(math.log10(brut))
+    for m in (1, 2, 2.5, 5, 10):
+        v = m * ex
+        if v >= brut:
+            return v
+    return 10 * ex
+
+def _footprint_trades_binance(asset, start_ms, end_ms, max_calls=150):
+    """Trades normalisés Binance USDT perpétuel (aggTrades). 'q' = quantité en
+    devise sous-jacente -> notionnel = q * p (PAS déjà en USD, contrairement à
+    Deribit BTC/ETH-PERPETUAL). Chaque appel est borné à moins d'1h par l'API :
+    pagination à deux niveaux (par tranche d'1h, puis par lot de 1000 dans la
+    tranche si l'activité est trop dense pour tenir en un seul appel)."""
+    # Les tranches d'1h sont INDEPENDANTES entre elles -> recuperees EN PARALLELE
+    # (ThreadPoolExecutor, meme pattern que global_liq_map/cross_exchange_oi) :
+    # BTC sur Binance genere facilement >1000 aggTrades par heure (mesure : jusqu'a
+    # 150M$/h), la pagination sequentielle rendait 6h de fenetre trop lente (~49s).
+    from concurrent.futures import ThreadPoolExecutor
+    symbol = f"{asset}USDT"
+    chunks = []
+    chunk_start = start_ms
+    while chunk_start < end_ms:
+        chunk_end = min(chunk_start + 3599_000, end_ms)
+        chunks.append((chunk_start, chunk_end))
+        chunk_start = chunk_end + 1
+    budget_par_chunk = max(1, max_calls // max(1, len(chunks)))
+
+    def _fetch_chunk(bounds):
+        c_start, c_end = bounds
+        rows, calls, sub_start = [], 0, c_start
+        while sub_start <= c_end and calls < budget_par_chunk:
+            calls += 1
+            r = requests.get("https://fapi.binance.com/fapi/v1/aggTrades",
+                             params={"symbol": symbol, "startTime": sub_start,
+                                     "endTime": c_end, "limit": 1000},
+                             timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            data = r.json()
+            if not isinstance(data, list) or not data:
+                break
+            for t in data:
+                rows.append({"ts": t["T"], "price": float(t["p"]),
+                            "notional": float(t["q"]) * float(t["p"]),
+                            "side": "sell" if t["m"] else "buy"})  # m=True -> agresseur vendeur
+            last_t = data[-1]["T"]
+            if len(data) < 1000 or last_t >= c_end:
+                break
+            sub_start = last_t + 1
+        return rows
+
+    out = []
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(chunks)))) as ex:
+        for rows in ex.map(_fetch_chunk, chunks):
+            out.extend(rows)
+    return out
+
+def _footprint_trades_deribit(asset, start_ms, end_ms, max_calls=60):
+    """Trades normalisés Deribit (perpétuel). 'amount' est déjà en USD sur les
+    contrats INVERSES BTC/ETH-PERPETUAL (contrats de 10 $) ; les perpétuels
+    linéaires USDC des altcoins cotent 'amount' dans la devise sous-jacente."""
+    inst = f"{asset}_USDC-PERPETUAL" if asset in DERIBIT_LINEAR else f"{asset}-PERPETUAL"
+    out, seen, cur_end = [], set(), end_ms
+    for _ in range(max_calls):
+        r = _deribit_get("public/get_last_trades_by_instrument_and_time",
+                         instrument_name=inst, start_timestamp=start_ms,
+                         end_timestamp=cur_end, count=1000, sorting="desc")
+        batch = r.get("trades") or []
+        if not batch:
+            break
+        new = 0
+        for t in batch:
+            tid = t.get("trade_id")
+            if tid in seen:
+                continue
+            seen.add(tid); new += 1
+            notional = (t["amount"] * (t.get("index_price") or t["price"])
+                       if asset in DERIBIT_LINEAR else t["amount"])
+            out.append({"ts": t["timestamp"], "price": t["price"],
+                       "notional": notional, "side": t["direction"]})
+        oldest = min(t["timestamp"] for t in batch)
+        if oldest <= start_ms or new == 0:
+            break
+        cur_end = oldest - 1
+    return out
+
+def _pas_prix_depuis_ranges(ranges_par_minute, prix_ref):
+    """Palier 'rond' déduit d'étendues de prix PAR MINUTE déjà calculées (médiane
+    / 20). Isolé de _pas_prix_pour() pour que le chemin STREAMING (deep backfill)
+    puisse dériver le pas sans jamais garder la liste des trades en mémoire --
+    seules les étendues par minute (1440 valeurs/jour max) sont nécessaires."""
+    ranges = sorted(r for r in ranges_par_minute if r > 0)
+    med = ranges[len(ranges) // 2] if ranges else prix_ref * 0.005
+    return _pas_rond(max(med / 20, prix_ref * 1e-5))
+
+def _pas_prix_pour(trades):
+    """Palier de prix déduit d'un lot de trades normalisés (en mémoire). Même
+    heuristique que _pas_prix_depuis_ranges, utilisée pour choisir le pas d'un
+    nouveau fichier journalier ET pour le mode à la demande (avant que rien ne
+    soit archivé)."""
+    if not trades:
+        return 1.0
+    par_min = {}
+    for t in trades:
+        m = t["ts"] // 60000
+        b = par_min.setdefault(m, [t["price"], t["price"]])
+        if t["price"] < b[0]: b[0] = t["price"]
+        if t["price"] > b[1]: b[1] = t["price"]
+    return _pas_prix_depuis_ranges((b[1] - b[0] for b in par_min.values()), trades[0]["price"])
+
+def _footprint_bucket_minutes(trades, pas_prix):
+    """Regroupe des trades normalisés en {t_minute: {niveau: [buy, sell]}}."""
+    minutes = {}
+    for t in trades:
+        m0 = (t["ts"] // 60000) * 60000
+        niveau = round(t["price"] / pas_prix) * pas_prix
+        cell = minutes.setdefault(m0, {}).setdefault(niveau, [0.0, 0.0])
+        if t["side"] == "buy":
+            cell[0] += t["notional"]
+        else:
+            cell[1] += t["notional"]
+    return minutes
+
+# --- Étape B : persistance 1 minute, collecteur idempotent ------------------------
+# ADDENDUM_FOOTPRINT.md section 8 : ne JAMAIS stocker les trades bruts -- le
+# footprint est stocké déjà agrégé en base 1 MINUTE (compressé gzip, stdlib, aucune
+# dépendance nouvelle). Les résolutions supérieures (5m/15m/1h/...) se déduisent par
+# simple SOMME des minutes -- aucune perte d'info, et c'est ce qui permet aussi de
+# calculer le max/min delta intra-barre (section 8bis.C.4), qui a besoin de la
+# séquence minute par minute, pas d'une bougie déjà agrégée.
+FOOTPRINT_DIR = os.path.join(HIST_DIR, "footprint")
+FOOTPRINT_ASSETS = ("BTC", "ETH", "SOL", "XRP", "AVAX", "TRX", "HYPE")
+
+def _footprint_path(asset, source, date_str):
+    return os.path.join(FOOTPRINT_DIR, f"{asset}_{source}_{date_str}.json.gz")
+
+def _footprint_load_day(asset, source, date_str):
+    """{'pas_prix':float, 'complete':bool, 'minutes':{t_minute:{niveau:[buy,sell]}}}
+    ou None si le fichier n'existe pas / est illisible (jamais d'exception vers
+    l'appelant). complete=True = archive officielle data.binance.vision
+    (définitif) ; False = reconstitué par REST (provisoire, remplaçable)."""
+    path = _footprint_path(asset, source, date_str)
+    if not os.path.exists(path):
+        return None
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            data = json.load(f)
+        minutes = {}
+        for b in data.get("barres", []):
+            minutes[b["t"]] = {p: [buy, sell] for p, buy, sell in b["n"]}
+        return {"pas_prix": data.get("pas_prix"), "complete": bool(data.get("complete")),
+               "minutes": minutes}
+    except Exception:
+        return None
+
+def _footprint_derniere_minute(asset, source):
+    """Timestamp ms de la dernière minute réellement archivée (pas la date du
+    fichier) -- regarde aujourd'hui ET hier (UTC) pour ne pas rater la dernière
+    minute d'hier juste après minuit. None si rien n'est archivé. Utilisé par
+    data_health() pour une fraîcheur en heures, pas en jours."""
+    today = dt.datetime.now(dt.timezone.utc).date()
+    best = None
+    for d in (today, today - dt.timedelta(days=1)):
+        day = _footprint_load_day(asset, source, d.isoformat())
+        if day and day["minutes"]:
+            m = max(day["minutes"])
+            if best is None or m > best:
+                best = m
+    return best
+
+def _footprint_save_day(asset, source, date_str, pas_prix, minutes, complete=False):
+    """Écriture ATOMIQUE (temp + os.replace) -- une lecture concurrente (dashboard
+    ouvert pendant la collecte) ne tombe jamais sur un fichier à moitié réécrit,
+    même motif que scenario_history()/liq_pocket_status() ailleurs dans ce fichier.
+    complete=True marque le jour comme DÉFINITIF (archive officielle) -- à
+    utiliser uniquement depuis backfill_footprint_day(), jamais depuis
+    record_footprint() qui reste toujours provisoire (REST)."""
+    os.makedirs(FOOTPRINT_DIR, exist_ok=True)
+    barres = []
+    for t in sorted(minutes):
+        niveaux = minutes[t]
+        n = [[p, round(v[0]), round(v[1])] for p, v in sorted(niveaux.items())]
+        barres.append({"t": t, "n": n})
+    payload = {"actif": asset, "source": source, "date": date_str, "res": "1m",
+               "pas_prix": pas_prix, "complete": bool(complete), "barres": barres}
+    path = _footprint_path(asset, source, date_str)
+    tmp = path + ".tmp"
+    with gzip.open(tmp, "wt", encoding="utf-8") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
+
+def record_footprint(asset, source="binance", minutes_fenetre=150):
+    """Agrège les trades des `minutes_fenetre` dernières minutes en footprint 1 min
+    et les FUSIONNE dans le(s) fichier(s) journalier(s) concerné(s) (une fenêtre
+    peut chevaucher minuit UTC).
+
+    IDEMPOTENT PAR MINUTE, STRICTEMENT : chaque minute touchée par cette collecte
+    est REMPLACÉE en entier (jamais additionnée à ce qui existait). Un recouvrement
+    entre deux runs (tâche toutes les 2h, fenêtre de collecte de 150 min = 2h30 de
+    marge) ne double donc jamais un volume -- le pire cas est de refaire le même
+    travail sur une minute déjà à jour, pas de la compter deux fois.
+
+    Le pas de prix est fixé au premier jour où le fichier est créé et RÉUTILISÉ
+    ensuite (jamais recalculé) pour qu'un niveau de prix garde le même sens d'un
+    appel à l'autre. Silencieux en cas d'échec réseau (appelé par une tâche de
+    fond, pas d'utilisateur pour voir une erreur) -- data_health() rend visible un
+    arrêt qui durerait."""
+    cfg = ASSETS.get(asset)
+    if not cfg or cfg.get("source") != "deribit":   # cfg["source"]=="deribit" veut dire "crypto"
+        return
+    try:
+        import time as _t
+        now_ms = int(_t.time() * 1000)
+        start_ms = now_ms - int(minutes_fenetre * 60000)
+        trades = (_footprint_trades_binance(asset, start_ms, now_ms) if source == "binance"
+                  else _footprint_trades_deribit(asset, start_ms, now_ms))
+        if not trades:
+            return
+        par_jour = {}
+        for t in trades:
+            date_str = dt.datetime.fromtimestamp(t["ts"] / 1000, dt.timezone.utc).date().isoformat()
+            par_jour.setdefault(date_str, []).append(t)
+        for date_str, day_trades in par_jour.items():
+            existing = _footprint_load_day(asset, source, date_str)
+            if existing and existing.get("complete"):
+                # jour deja definitif (archive officielle) : le REST ne doit
+                # jamais le degrader en provisoire, on l'ignore.
+                continue
+            pas_prix = existing["pas_prix"] if existing else _pas_prix_pour(day_trades)
+            minutes = existing["minutes"] if existing else {}
+            fresh = _footprint_bucket_minutes(day_trades, pas_prix)
+            for m0, niveaux in fresh.items():
+                minutes[m0] = niveaux   # remplacement STRICT, jamais une addition
+            _footprint_save_day(asset, source, date_str, pas_prix, minutes, complete=False)
+    except Exception:
+        pass
+
+# --- Rattrapage automatique (archives officielles data.binance.vision) -----------
+# Un jour reconstitué par REST (record_footprint) est PROVISOIRE : la fenêtre de
+# collecte peut avoir raté des minutes (PC éteint, tâche en retard...). Dès que le
+# jour est terminé, Binance publie une archive quotidienne complète et vérifiable
+# (data.binance.vision) -- on la télécharge automatiquement et elle REMPLACE le
+# provisoire par du définitif. Jamais lancé à la main : déclenché au démarrage du
+# serveur et à chaque ouverture de /chart (start_footprint_backfill_async), en
+# tâche de fond, jamais bloquant.
+FOOTPRINT_BACKFILL_LOCK = threading.Lock()
+
+def _footprint_marker_path(asset, source):
+    return os.path.join(FOOTPRINT_DIR, f"_debut_{asset}_{source}.txt")
+
+def _footprint_collection_start(asset, source):
+    """Date (str) du tout premier jour de collecte pour cet actif/source --
+    écrite UNE SEULE FOIS (au tout premier appel où elle n'existe pas encore) et
+    jamais recalculée ensuite : sert de borne basse au rattrapage, on ne remonte
+    jamais avant le début réel de la collecte."""
+    path = _footprint_marker_path(asset, source)
+    try:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                v = f.read().strip()
+                if v:
+                    return v
+    except Exception:
+        pass
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    try:
+        os.makedirs(FOOTPRINT_DIR, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(today)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+    return today
+
+def _footprint_day_status(asset, source, date_str):
+    """'complete' (archive officielle, définitif) / 'provisional' (REST, en
+    attente d'être remplacé) / 'missing' (rien du tout)."""
+    day = _footprint_load_day(asset, source, date_str)
+    if day is None:
+        return "missing"
+    return "complete" if day.get("complete") else "provisional"
+
+def _footprint_expected_days(asset, source):
+    """Jours attendus COMPLETS : de la date de début de collecte à hier inclus.
+    Aujourd'hui n'est jamais dans cette liste -- le jour n'est pas terminé, il est
+    provisoire par nature, ce n'est pas une anomalie à rattraper."""
+    start = dt.date.fromisoformat(_footprint_collection_start(asset, source))
+    hier = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)
+    out, d = [], start
+    while d <= hier:
+        out.append(d.isoformat())
+        d += dt.timedelta(days=1)
+    return out
+
+def footprint_backfill_status(asset="BTC", source="binance"):
+    """{'complete':n, 'provisional':n, 'missing':n, 'total_attendu':n} sur la
+    plage [début de collecte, hier]. Utilisé par data_health()."""
+    jours = _footprint_expected_days(asset, source)
+    out = {"complete": 0, "provisional": 0, "missing": 0, "total_attendu": len(jours)}
+    for j in jours:
+        st = _footprint_day_status(asset, source, j)
+        out[st] = out.get(st, 0) + 1
+    return out
+
+def _binance_vision_aggregate_day_streaming(asset, date_str, pas_prix_existant=None):
+    """Télécharge ET agrège un jour d'archive Binance EN FLUX (rattrapage profond,
+    180 jours possibles -- ne doit jamais accumuler la tape brute en mémoire) :
+    1) la réponse HTTP est écrite directement sur disque au fur et à mesure
+       (requests stream=True + iter_content), jamais bufferisée entièrement en RAM
+       (un jour = ~9 Mo, mais 180 jours × 2 actifs en parallèle ne doivent pas
+       cumuler des Go de RAM) ;
+    2) le CSV est lu LIGNE PAR LIGNE depuis le zip (deux passages locaux SUR LE
+       FICHIER DÉJÀ TÉLÉCHARGÉ, aucun coût réseau supplémentaire) : un premier
+       passage calcule juste les étendues de prix par minute pour déterminer le
+       palier de prix (sauté si `pas_prix_existant` est déjà connu -- un jour
+       provisoire existant, ou un jour voisin déjà agrégé) ; le second agrège
+       réellement. Seul le résultat {minute: {niveau: [buy,sell]}} est gardé en
+       mémoire -- bien plus petit que la tape brute (~740k lignes/jour sur BTC).
+    Le zip temporaire est SUPPRIMÉ à la fin (succès ou échec).
+    Renvoie (pas_prix, minutes) ou (None, None) si l'archive n'est pas encore
+    publiée, l'actif est absent de Binance, ou en cas d'échec réseau."""
+    import zipfile, csv, io, tempfile
+    symbol = f"{asset}USDT"
+    url = (f"https://data.binance.vision/data/futures/um/daily/aggTrades/"
+           f"{symbol}/{symbol}-aggTrades-{date_str}.zip")
+    tmp_path = None
+    try:
+        os.makedirs(FOOTPRINT_DIR, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(suffix=".zip", dir=FOOTPRINT_DIR)
+        os.close(fd)
+        with requests.get(url, timeout=90, headers={"User-Agent": "Mozilla/5.0"},
+                         stream=True) as r:
+            if r.status_code != 200:
+                return None, None
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):   # 1 Mo/lot, jamais tout d'un coup
+                    if chunk:
+                        f.write(chunk)
+
+        def _lignes():
+            with zipfile.ZipFile(tmp_path) as z:
+                with z.open(z.namelist()[0]) as raw:
+                    yield from csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8"))
+
+        pas_prix = pas_prix_existant
+        if pas_prix is None:
+            ranges, prix_ref = {}, None
+            for row in _lignes():
+                price = float(row["price"])
+                if prix_ref is None:
+                    prix_ref = price
+                m = int(row["transact_time"]) // 60000
+                b = ranges.setdefault(m, [price, price])
+                if price < b[0]: b[0] = price
+                if price > b[1]: b[1] = price
+            if prix_ref is None:
+                return None, None   # archive vide/corrompue
+            pas_prix = _pas_prix_depuis_ranges((b[1] - b[0] for b in ranges.values()), prix_ref)
+
+        minutes, n = {}, 0
+        for row in _lignes():
+            price, qty = float(row["price"]), float(row["quantity"])
+            m0 = (int(row["transact_time"]) // 60000) * 60000
+            niveau = round(price / pas_prix) * pas_prix
+            cell = minutes.setdefault(m0, {}).setdefault(niveau, [0.0, 0.0])
+            if row["is_buyer_maker"] == "true":
+                cell[1] += price * qty   # maker acheteur -> agresseur VENDEUR
+            else:
+                cell[0] += price * qty
+            n += 1
+        return (pas_prix, minutes) if n else (None, None)
+    except Exception:
+        return None, None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)   # supprime le zip une fois agrege, succes ou echec
+            except OSError:
+                pass
+
+def backfill_footprint_day(asset, source, date_str):
+    """Reconstitue UN jour depuis l'archive officielle et l'écrit comme DÉFINITIF
+    (complete=True), remplaçant toute version provisoire existante. True si écrit,
+    False sinon (archive pas encore publiée, actif absent de Binance, échec...).
+    Traite le zip EN FLUX (_binance_vision_aggregate_day_streaming) : jamais toute
+    la tape en mémoire, le zip temporaire est supprimé après agrégation."""
+    if source != "binance":
+        return False   # data.binance.vision = Binance uniquement
+    existing = _footprint_load_day(asset, source, date_str)
+    pas_prix_existant = existing["pas_prix"] if existing else None
+    pas_prix, minutes = _binance_vision_aggregate_day_streaming(asset, date_str, pas_prix_existant)
+    if not minutes:
+        return False
+    _footprint_save_day(asset, source, date_str, pas_prix, minutes, complete=True)
+    return True
+
+def run_deep_backfill(assets, days=180, source="binance", on_progress=None):
+    """Rattrapage HISTORIQUE PROFOND (potentiellement des dizaines de minutes,
+    mesuré : ~6-7s/jour/actif) : reconstitue les `days` derniers jours COMPLETS
+    (hier inclus, aujourd'hui exclu -- toujours provisoire par nature) pour
+    chaque actif, depuis les archives officielles Binance.
+
+    RESUMABLE SANS ÉTAT SÉPARÉ : un jour déjà 'complete' est simplement sauté
+    (vérifié sur disque via _footprint_day_status, aucun fichier de progression à
+    part) -- relancer cette fonction après une interruption (crash, Ctrl+C,
+    redémarrage) reprend exactement où elle en était, sans jamais retélécharger
+    ce qui est déjà agrégé.
+
+    Ordre JOUR PAR JOUR (le plus récent d'abord), tous les actifs pour un jour
+    donné avant de passer au jour précédent -- si le job est interrompu, le passé
+    récent est couvert pour TOUS les actifs plutôt qu'un seul actif fini et
+    l'autre pas commencé.
+
+    on_progress(asset, date_str, statut, i, total) est appelé après CHAQUE jour
+    (statut: 'deja_fait'/'ok'/'indisponible'/'erreur') si fourni, pour le suivi."""
+    hier = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)
+    jours = [(hier - dt.timedelta(days=k)).isoformat() for k in range(days)]
+    total = len(jours) * len(assets)
+    i = 0
+    for date_str in jours:
+        for asset in assets:
+            i += 1
+            try:
+                if _footprint_day_status(asset, source, date_str) == "complete":
+                    statut = "deja_fait"
+                else:
+                    statut = "ok" if backfill_footprint_day(asset, source, date_str) else "indisponible"
+            except Exception:
+                statut = "erreur"
+            if on_progress:
+                try:
+                    on_progress(asset, date_str, statut, i, total)
+                except Exception:
+                    pass
+
+def _footprint_backfill_scan_once(assets=None, source="binance"):
+    """Un passage de rattrapage complet : pour chaque actif, chaque jour attendu
+    pas encore 'complete' est reconstitué depuis l'archive officielle.
+    Best-effort par jour : un échec n'empêche jamais les autres jours/actifs."""
+    for asset in (assets or FOOTPRINT_ASSETS):
+        for date_str in _footprint_expected_days(asset, source):
+            try:
+                if _footprint_day_status(asset, source, date_str) != "complete":
+                    backfill_footprint_day(asset, source, date_str)
+            except Exception:
+                continue
+
+def start_footprint_backfill_async(assets=None, source="binance"):
+    """Lance un passage de rattrapage EN TÂCHE DE FOND -- ne bloque JAMAIS
+    l'appelant (démarrage serveur, ouverture de /chart). Si un passage tourne déjà
+    (verrou non acquis), ce déclenchement est simplement ignoré : plusieurs
+    ouvertures rapprochées de la page ne lancent pas des balayages concurrents."""
+    if not FOOTPRINT_BACKFILL_LOCK.acquire(blocking=False):
+        return
+    def _run():
+        try:
+            _footprint_backfill_scan_once(assets, source)
+        finally:
+            FOOTPRINT_BACKFILL_LOCK.release()
+    threading.Thread(target=_run, daemon=True).start()
+
+def _footprint_aggregate(minutes, pas_prix, res):
+    """{t_minute:{niveau:[buy,sell]}} -> [{t,niveaux,total_buy,total_sell,delta,
+    poc,max_delta,min_delta}] à la résolution demandée. Simple somme des minutes
+    (aucune perte), + marche minute par minute pour le max/min delta intra-barre
+    (ADDENDUM_FOOTPRINT.md 8bis.C.4)."""
+    if not minutes:
+        return []
+    taille = int(RESOLUTIONS.get(res, ("5", 5))[1] * 60000)
+    par_bar = {}
+    for t in sorted(minutes):
+        par_bar.setdefault((t // taille) * taille, []).append(t)
+    barres = []
+    for b0 in sorted(par_bar):
+        agg, courant, max_d, min_d = {}, 0.0, 0.0, 0.0
+        for tm in par_bar[b0]:
+            d_min = 0.0
+            for p, (buy, sell) in minutes[tm].items():
+                cell = agg.setdefault(p, [0.0, 0.0])
+                cell[0] += buy; cell[1] += sell
+                d_min += buy - sell
+            courant += d_min
+            if courant > max_d: max_d = courant
+            if courant < min_d: min_d = courant
+        niveaux = sorted(
+            ({"p": p, "buy": round(v[0]), "sell": round(v[1]), "delta": round(v[0] - v[1])}
+             for p, v in agg.items()),
+            key=lambda x: x["p"], reverse=True)
+        tb = sum(n["buy"] for n in niveaux)
+        tsell = sum(n["sell"] for n in niveaux)
+        poc = max(niveaux, key=lambda n: n["buy"] + n["sell"])["p"] if niveaux else None
+        barres.append({"t": b0, "niveaux": niveaux, "total_buy": round(tb),
+                       "total_sell": round(tsell), "delta": round(tb - tsell), "poc": poc,
+                       "max_delta": round(max_d), "min_delta": round(min_d)})
+    return barres
+
+def read_footprint(asset, source, debut_ms, fin_ms):
+    """Relit UNIQUEMENT les fichiers archivés (aucun appel réseau) sur [debut,fin).
+    {'pas_prix':float, 'derniere_minute':int|None, 'minutes':{...}} ou None si rien
+    n'est archivé sur cette plage. `minutes` est renvoyé brut (pas encore agrégé à
+    une résolution) pour pouvoir être fusionné avec une éventuelle queue live."""
+    d0 = dt.datetime.fromtimestamp(debut_ms / 1000, dt.timezone.utc).date()
+    d1 = dt.datetime.fromtimestamp(max(debut_ms, fin_ms - 1) / 1000, dt.timezone.utc).date()
+    minutes, pas_prix = {}, None
+    d = d0
+    while d <= d1:
+        day = _footprint_load_day(asset, source, d.isoformat())
+        if day:
+            if pas_prix is None:
+                pas_prix = day["pas_prix"]
+            for t, niveaux in day["minutes"].items():
+                if debut_ms <= t < fin_ms:
+                    minutes[t] = niveaux
+        d += dt.timedelta(days=1)
+    if not minutes:
+        return None
+    return {"pas_prix": pas_prix, "derniere_minute": max(minutes), "minutes": minutes}
+
+def footprint(asset, res="5m", heures=6, pas_prix=None, source="binance"):
+    """[{t, niveaux:[{p,buy,sell,delta}] (triés prix décroissant), total_buy,
+    total_sell, delta, poc, max_delta, min_delta}] ou None (actif macro, source
+    indispo, ou aucun trade dans la fenêtre). Notionnel en USD brut, le rendu
+    formate. source: 'binance' (défaut, volume de référence) ou 'deribit'
+    (comparaison). LIT L'ARCHIVE EN PRIORITÉ (record_footprint) et ne sollicite
+    l'API que pour la période récente pas encore archivée (le "trou" entre la
+    dernière minute stockée et maintenant) -- jamais pour ce qui est déjà sur
+    disque."""
+    cfg = ASSETS.get(asset)
+    if not cfg or cfg.get("source") != "deribit":
+        return None
+    source = source if source in ("binance", "deribit") else "binance"
+    import time as _t
+    now = _t.time()
+    key = (asset, res, heures, source)
+    c = _FOOTPRINT_CACHE.get(key)
+    if c and now - c[0] < 60:
+        return c[1]
+    out = None
+    try:
+        now_ms = int(now * 1000)
+        start_ms = now_ms - int(heures * 3600 * 1000)
+        archive = read_footprint(asset, source, start_ms, now_ms)
+        minutes = dict(archive["minutes"]) if archive else {}
+        pas_final = archive["pas_prix"] if archive else pas_prix
+        gap_start = (archive["derniere_minute"] + 60000) if archive else start_ms
+        n_trades_live = 0
+        if gap_start < now_ms:
+            trades = (_footprint_trades_binance(asset, gap_start, now_ms) if source == "binance"
+                      else _footprint_trades_deribit(asset, gap_start, now_ms))
+            if not trades and not minutes and source == "binance":
+                # repli si Binance ne liste pas cet actif (ex. altcoin recent)
+                trades = _footprint_trades_deribit(asset, gap_start, now_ms)
+                source = "deribit (repli, Binance indisponible pour cet actif)"
+            n_trades_live = len(trades)
+            if trades:
+                if pas_final is None:
+                    pas_final = _pas_prix_pour(trades)
+                fresh = _footprint_bucket_minutes(trades, pas_final)
+                minutes.update(fresh)   # le trou ne recouvre jamais l'archive (gap_start > derniere_minute)
+        if minutes and pas_final:
+            barres = _footprint_aggregate(minutes, pas_final, res)
+            deribit_inst = f"{asset}_USDC-PERPETUAL" if asset in DERIBIT_LINEAR else f"{asset}-PERPETUAL"
+            label = {"binance": f"Binance {asset}USDT (perpétuel, tape réelle)",
+                     "deribit": f"Deribit {deribit_inst} (tape réelle)"}.get(
+                     source, f"{source} (tape réelle)")
+            archive_txt = f" · {len(archive['minutes'])} min archivées" if archive else ""
+            out = {"asset": asset, "res": res, "pas_prix": pas_final,
+                   "source": label + archive_txt,
+                   "n_trades": n_trades_live, "barres": barres}
+    except Exception:
+        out = None
+    _FOOTPRINT_CACHE[key] = (now, out)
+    return out
+
 # === Détection des changements notables (rapport intelligent) =====================
 # Compare l'état du jour à celui de la veille et ne retient QUE ce qui a vraiment
 # changé, avec un niveau de gravité. C'est ce qui transforme une liste de chiffres
@@ -2958,6 +3552,39 @@ def data_health(sentinel="BTC"):
         rows.append({"flux": name, "last": last, "age_days": age, "status": st})
         if rank[st] > rank[worst]:
             worst = st
+    # Footprint (collecteur Étape B, ADDENDUM_FOOTPRINT.md) : granularité en HEURES,
+    # pas en jours comme les flux ci-dessus -- la tâche tourne toutes les 2h, un
+    # contrôle au jour près laisserait un arrêt silencieux invisible jusqu'au
+    # lendemain. On regarde l'âge de la dernière MINUTE réellement stockée, pas
+    # juste la date du fichier.
+    fp_last_ms = _footprint_derniere_minute(sentinel, "binance")
+    if fp_last_ms is None:
+        fp_row = {"flux": "Footprint order flow (Binance, collecteur)", "last": None,
+                  "age_days": None, "status": "never"}
+    else:
+        age_h = (dt.datetime.now(dt.timezone.utc).timestamp() * 1000 - fp_last_ms) / 3600000
+        fp_st = "ok" if age_h <= 2.5 else "warn" if age_h <= 6 else "late"
+        fp_row = {"flux": "Footprint order flow (Binance, collecteur)",
+                  "last": dt.datetime.fromtimestamp(fp_last_ms / 1000, dt.timezone.utc)
+                          .strftime("%Y-%m-%d %Hh%M UTC"),
+                  "age_days": round(age_h / 24, 2), "status": fp_st}
+    rows.append(fp_row)
+    if rank[fp_row["status"]] > rank[worst]:
+        worst = fp_row["status"]
+    # Rattrapage automatique (archives officielles) : combien de jours attendus
+    # (depuis le début de la collecte, hors aujourd'hui) sont définitifs, encore
+    # provisoires, ou pas du tout reconstitués. "missing" est ce qui doit alerter
+    # (le rattrapage en tâche de fond a échoué ou n'est pas encore passé dessus) ;
+    # "provisional" seul est normal, il se résorbe tout seul en arrière-plan.
+    bf = footprint_backfill_status(sentinel, "binance")
+    bf_st = "warn" if bf["missing"] > 0 else "ok"
+    bf_row = {"flux": "Footprint — rattrapage archives officielles",
+              "last": (f"{bf['complete']} complet(s) · {bf['provisional']} provisoire(s) · "
+                      f"{bf['missing']} manquant(s) (sur {bf['total_attendu']} jour(s) attendu(s))"),
+              "age_days": 0, "status": bf_st}
+    rows.append(bf_row)
+    if rank[bf_row["status"]] > rank[worst]:
+        worst = bf_row["status"]
     return {"rows": rows, "worst": worst, "sentinel": sentinel}
 
 # === Tape Deribit : flux client signé -> signe dealer EMPIRIQUE ===================

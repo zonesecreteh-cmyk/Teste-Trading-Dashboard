@@ -2,3 +2,13 @@ __pycache__/
 *.pyc
 daily_log.txt
 snapshots/
+
+# footprint (order flow) : se rattrape par archives Binance a la demande,
+# pese des centaines de Mo -- n'a rien a faire sur GitHub
+iv_history/footprint/
+*.zip
+stdout.txt
+stderr.txt
+*_log.txt
+decoded.html
+test_bt.py

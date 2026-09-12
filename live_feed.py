@@ -19,7 +19,9 @@ prétendre couvrir un exchange qui ne répond pas.
 Pré-requis : pip install websocket-client
 Utilisation : start() une seule fois au démarrage de flow_dashboard.py.
 """
-import os, json, time, threading, datetime as dt
+import os, json, time, threading, queue, datetime as dt
+import requests
+import flow_engine as fe
 
 try:
     import websocket   # websocket-client
@@ -260,6 +262,107 @@ def _bybit_loop(stop_event):
 
 
 _stop_event = threading.Event()
+
+# --- Footprint live : polling REST rapide (pas de websocket) ----------------------
+# Diagnostiqué le 2026-09-10 : le websocket FUTURES Binance (fstream.binance.com)
+# ouvre la connexion mais ne délivre JAMAIS un seul message, depuis ce PC ET depuis
+# cet environnement de test -- probablement un filtrage FAI sur les dérivés (le
+# websocket SPOT et le REST futures fonctionnent tous les deux normalement). Un
+# relais serveur par websocket a donc été abandonné : ceci interroge le REST
+# futures (confirmé fiable) toutes les ~1s et pousse les nouveaux trades, DÉJÀ
+# AGRÉGÉS par minute/palier de prix, aux abonnés SSE. Poller démarré à la demande
+# (premier abonné) et arrêté quand plus personne ne regarde -- pas de coût pour un
+# actif que personne ne consulte en direct.
+FP_POLLERS = {}
+_fp_pollers_lock = threading.Lock()
+
+def _fp_poll_loop(asset, st):
+    symbol = f"{asset}USDT"
+    backoff = 1.0
+    while not st["stop"].is_set():
+        try:
+            params = {"symbol": symbol, "limit": 1000}
+            if st["last_id"] is not None:
+                params["fromId"] = st["last_id"] + 1
+            r = requests.get("https://fapi.binance.com/fapi/v1/aggTrades", params=params,
+                             timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            data = r.json()
+            if isinstance(data, list) and data:
+                # le pas de prix se LIT depuis l'archive du jour, jamais recalculé ici
+                # (sinon les cellules live et historique désalignent, cf. diagnostic
+                # du point 2) -- repli formule (pas d'historique du tout, tres tot
+                # dans une nouvelle journee) sur le premier prix vu par ce poller.
+                pas_prix = fe.footprint_pas_prix_actuel(asset, "binance") or st.get("pas_repli")
+                if pas_prix is None:
+                    pas_prix = fe._pas_rond(float(data[0]["p"]) * 1e-4)
+                    st["pas_repli"] = pas_prix
+                minutes = {}
+                for t in data:
+                    price, qty = float(t["p"]), float(t["q"])
+                    m0 = (int(t["T"]) // 60000) * 60000
+                    niveau = round(price / pas_prix) * pas_prix
+                    cell = minutes.setdefault(m0, {}).setdefault(niveau, [0.0, 0.0])
+                    if t["m"]:
+                        cell[1] += price * qty   # maker acheteur -> agresseur VENDEUR
+                    else:
+                        cell[0] += price * qty
+                st["last_id"] = data[-1]["a"]
+                # arrondit pour un payload compact ; regroupe en lot, PAS un message par trade
+                lot = {m0: {p: [round(b), round(s)] for p, (b, s) in niveaux.items()}
+                       for m0, niveaux in minutes.items()}
+                payload = json.dumps({"asset": asset, "pas_prix": pas_prix, "minutes": lot})
+                with st["lock"]:
+                    morts = []
+                    for q in st["subs"]:
+                        try:
+                            q.put_nowait(payload)
+                        except queue.Full:
+                            morts.append(q)
+                    for q in morts:
+                        st["subs"].discard(q)
+                st["ok"] = True
+            backoff = 1.0
+        except Exception:
+            st["ok"] = False
+            backoff = min(10.0, backoff * 1.5)
+        st["stop"].wait(max(1.0, backoff))
+
+def fp_subscribe(asset):
+    """Abonne au flux live footprint d'un actif (polling REST cote serveur).
+    Demarre le thread de polling au tout premier abonne, jamais avant. Renvoie une
+    queue.Queue a lire (bloquant) cote appelant (la route SSE)."""
+    asset = asset.upper()
+    with _fp_pollers_lock:
+        st = FP_POLLERS.get(asset)
+        if st is None:
+            st = {"stop": threading.Event(), "subs": set(), "lock": threading.Lock(),
+                  "last_id": None, "ok": False, "pas_repli": None}
+            FP_POLLERS[asset] = st
+            threading.Thread(target=_fp_poll_loop, args=(asset, st), daemon=True).start()
+        q = queue.Queue(maxsize=200)
+        with st["lock"]:
+            st["subs"].add(q)
+    return q
+
+def fp_unsubscribe(asset, q):
+    """Retire un abonné ; arrête et supprime le poller si c'était le dernier."""
+    asset = asset.upper()
+    with _fp_pollers_lock:
+        st = FP_POLLERS.get(asset)
+        if not st:
+            return
+        with st["lock"]:
+            st["subs"].discard(q)
+            vide = not st["subs"]
+        if vide:
+            st["stop"].set()
+            del FP_POLLERS[asset]
+
+def fp_status(asset):
+    st = FP_POLLERS.get(asset.upper())
+    if not st:
+        return {"actif": False}
+    return {"actif": True, "connecte": bool(st.get("ok")), "abonnes": len(st["subs"])}
 
 
 def start():

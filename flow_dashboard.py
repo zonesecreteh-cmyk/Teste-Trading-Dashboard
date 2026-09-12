@@ -4779,73 +4779,89 @@ async function chargerFootprint(){
 // (ADDENDUM_FOOTPRINT.md 8bis.A) -- le serveur Python n'est PAS dans la boucle du
 // live, seulement pour l'historique. Reconnexion automatique a delai croissant
 // (1s,2s,4s...30s max). Binance uniquement (Deribit reste a la demande, Etape A).
-let fpWs=null, fpWsSymbol=null, fpLiveOK=false, fpReconnectDelay=1000, fpRedrawQueued=false;
-let fpLiveState={barT:null, courant:0};
+// Relais SERVEUR (Server-Sent Events), pas un websocket direct : le websocket
+// FUTURES Binance s'est revele bloque (connexion ouverte, zero message) depuis ce
+// PC ET depuis un environnement de test independant -- filtrage reseau sur les
+// derives, confirme des deux cotes. Le serveur interroge le REST futures (fiable)
+// et pousse des LOTS DEJA AGREGES par minute/palier -- jamais un trade individuel.
+let fpSSE=null, fpLiveOK=false, fpLastDraw=0, fpDrawTimer=null;
 
 function majPastilleFpLive(reco){
   const el=document.getElementById('fpLivepoint');
   if(!el) return;
   el.classList.toggle('on', fpLiveOK);
   el.classList.toggle('reco', !fpLiveOK && !!reco);
-  el.title = fpLiveOK ? 'Footprint en direct (websocket Binance, aggTrade)'
+  el.title = fpLiveOK ? 'Footprint en direct (relais serveur, polling REST Binance)'
            : (reco ? 'Reconnexion au footprint live…' : '');
 }
-function fermerFpWS(){
-  if(fpWs){ try{ fpWs.onclose=null; fpWs.close(); }catch(e){} fpWs=null; }
-  fpWsSymbol=null; fpLiveOK=false; majPastilleFpLive(false);
+function fermerFpSSE(){
+  if(fpSSE){ try{ fpSSE.onerror=null; fpSSE.close(); }catch(e){} fpSSE=null; }
+  fpLiveOK=false; majPastilleFpLive(false);
 }
-function ouvrirFpWS(asset){
-  if(fpWs){ try{ fpWs.onclose=null; fpWs.close(); }catch(e){} fpWs=null; }
-  const symbol=asset.toLowerCase()+'usdt';
-  fpWsSymbol=symbol; fpLiveOK=false;
-  let sock;
-  try{ sock=new WebSocket('wss://fstream.binance.com/ws/'+symbol+'@aggTrade'); }catch(e){ return; }
-  fpWs=sock;
-  sock.onopen=()=>{
-    if(fpWs!==sock) return;
-    fpLiveOK=true; fpReconnectDelay=1000; majPastilleFpLive();
+function ouvrirFpSSE(asset){
+  fermerFpSSE();
+  let src;
+  try{ src=new EventSource('/api/footprint/stream/'+encodeURIComponent(asset)); }catch(e){ return; }
+  fpSSE=src;
+  src.onopen=()=>{
+    if(fpSSE!==src) return;
+    fpLiveOK=true; majPastilleFpLive();
     chargerFootprint();   // recharge l'historique recent en REST pour combler un eventuel trou
   };
-  sock.onmessage=(ev)=>{
-    if(fpWs!==sock) return;
+  src.onmessage=(ev)=>{
+    if(fpSSE!==src) return;
     let msg; try{ msg=JSON.parse(ev.data); }catch(e){ return; }
-    if(msg.e!=='aggTrade') return;
-    traiterFpTick(parseFloat(msg.p), parseFloat(msg.q), msg.m?'sell':'buy', msg.T);
-    if(!fpRedrawQueued){ fpRedrawQueued=true; requestAnimationFrame(()=>{ fpRedrawQueued=false; dessiner(); }); }
+    traiterFpLot(msg.pas_prix, msg.minutes);
+    fpScheduleRedraw();
   };
-  sock.onclose=()=>{
-    if(fpWs!==sock) return;
+  src.onerror=()=>{
+    if(fpSSE!==src) return;
     fpLiveOK=false; majPastilleFpLive(true);
-    // reconnexion SEULEMENT si toujours en mode footprint/Binance sur le meme actif
-    if(modeGraphe==='footprint' && fpSource==='binance' && document.getElementById('asset').value===asset){
-      const d=fpReconnectDelay;
-      setTimeout(()=>{ if(fpWsSymbol===symbol) ouvrirFpWS(asset); }, d);
-      fpReconnectDelay=Math.min(30000, fpReconnectDelay*2);
-    }
+    // EventSource se reconnecte nativement tout seul (delai par defaut du
+    // navigateur, ~3s) -- rien a orchestrer a la main ici.
   };
-  sock.onerror=()=>{ try{ sock.close(); }catch(e){} };
 }
-function traiterFpTick(price, qty, side, ts){
-  if(!FP || !FP.pas_prix || !FP.barres) return;
-  const taille=MINUTES_RES[res]*60000, t0=Math.floor(ts/taille)*taille;
-  let bar=FP.barres.length ? FP.barres[FP.barres.length-1] : null;
-  if(!bar || bar.t!==t0){
-    if(bar && t0<bar.t) return;   // tick en retard sur une barre deja close : ignore
-    bar={t:t0, niveaux:[], total_buy:0, total_sell:0, delta:0, poc:null, max_delta:0, min_delta:0};
-    FP.barres.push(bar);
-    fpLiveState={barT:t0, courant:0};
+function fpScheduleRedraw(){
+  // Throttle EXPLICITE a 150ms max : requestAnimationFrame seul suit le taux de
+  // rafraichissement ecran (~60Hz = ~16ms), jusqu'a 9x plus frequent que voulu.
+  const maintenant=performance.now(), ecoule=maintenant-fpLastDraw;
+  if(ecoule>=150){ fpLastDraw=maintenant; dessiner(); }
+  else if(!fpDrawTimer){
+    fpDrawTimer=setTimeout(()=>{ fpDrawTimer=null; fpLastDraw=performance.now(); dessiner(); }, 150-ecoule);
   }
-  const niveau=Math.round(price/FP.pas_prix)*FP.pas_prix, notional=price*qty;
-  let n=bar.niveaux.find(x=>x.p===niveau);
-  if(!n){ n={p:niveau, buy:0, sell:0, delta:0}; bar.niveaux.push(n); bar.niveaux.sort((a,b)=>b.p-a.p); }
-  if(side==='buy'){ n.buy+=notional; bar.total_buy+=notional; } else { n.sell+=notional; bar.total_sell+=notional; }
-  n.delta=n.buy-n.sell; bar.delta=bar.total_buy-bar.total_sell;
-  let meilleur=null;
-  bar.niveaux.forEach(x=>{ if(!meilleur || (x.buy+x.sell)>(meilleur.buy+meilleur.sell)) meilleur=x; });
-  bar.poc=meilleur?meilleur.p:bar.poc;
-  fpLiveState.courant += (side==='buy'?notional:-notional);
-  if(fpLiveState.courant>bar.max_delta) bar.max_delta=fpLiveState.courant;
-  if(fpLiveState.courant<bar.min_delta) bar.min_delta=fpLiveState.courant;
+}
+function traiterFpLot(pasPrix, minutesLot){
+  if(!FP || !FP.barres || !pasPrix || !minutesLot) return;
+  FP.pas_prix=pasPrix;   // toujours celui envoye par le serveur (archive du jour), jamais recalcule ici
+  const taille=MINUTES_RES[res]*60000;
+  Object.keys(minutesLot).forEach(m0str=>{
+    const m0=Number(m0str), t0=Math.floor(m0/taille)*taille;
+    let bar=FP.barres.find(b=>b.t===t0);
+    if(!bar){
+      bar={t:t0, niveaux:[], total_buy:0, total_sell:0, delta:0, poc:null, max_delta:0, min_delta:0, _courant:0};
+      FP.barres.push(bar); FP.barres.sort((a,b)=>a.t-b.t);
+    }
+    let dMinute=0;
+    Object.entries(minutesLot[m0str]).forEach(([pStr,bs])=>{
+      const p=Number(pStr), buy=bs[0]||0, sell=bs[1]||0;
+      let n=bar.niveaux.find(x=>x.p===p);
+      if(!n){ n={p,buy:0,sell:0,delta:0}; bar.niveaux.push(n); bar.niveaux.sort((a,b)=>b.p-a.p); }
+      n.buy+=buy; n.sell+=sell; n.delta=n.buy-n.sell;
+      dMinute+=buy-sell;
+    });
+    bar.total_buy=bar.niveaux.reduce((s,n)=>s+n.buy,0);
+    bar.total_sell=bar.niveaux.reduce((s,n)=>s+n.sell,0);
+    bar.delta=bar.total_buy-bar.total_sell;
+    let meilleur=null;
+    bar.niveaux.forEach(x=>{ if(!meilleur||(x.buy+x.sell)>(meilleur.buy+meilleur.sell)) meilleur=x; });
+    bar.poc=meilleur?meilleur.p:bar.poc;
+    // max/min delta intra-barre : approximation temps-reel par cumul a l'arrivee
+    // des lots (l'ordre minute-par-minute exact, comme cote archive, demanderait
+    // de rejouer l'historique -- acceptable pour la barre EN COURS de formation).
+    bar._courant=(bar._courant||0)+dMinute;
+    if(bar._courant>bar.max_delta) bar.max_delta=bar._courant;
+    if(bar._courant<bar.min_delta) bar.min_delta=bar._courant;
+  });
 }
 
 function setFpSource(s, el){
@@ -4854,7 +4870,7 @@ function setFpSource(s, el){
   if(el) el.classList.add('active');
   if(modeGraphe==='footprint'){
     chargerFootprint();
-    if(fpSource==='binance') ouvrirFpWS(document.getElementById('asset').value); else fermerFpWS();
+    if(fpSource==='binance') ouvrirFpSSE(document.getElementById('asset').value); else fermerFpSSE();
   }
 }
 function basculerMode(){
@@ -4863,9 +4879,9 @@ function basculerMode(){
   document.getElementById('fpSrc').style.display = (modeGraphe==='footprint') ? 'flex' : 'none';
   if(modeGraphe==='footprint'){
     chargerFootprint();
-    if(fpSource==='binance') ouvrirFpWS(document.getElementById('asset').value); else fermerFpWS();
+    if(fpSource==='binance') ouvrirFpSSE(document.getElementById('asset').value); else fermerFpSSE();
   } else {
-    fermerFpWS();
+    fermerFpSSE();
     dessiner();
   }
 }
@@ -4971,7 +4987,7 @@ async function charger(){
   dessiner();
   if(modeGraphe==='footprint'){   // actif/resolution ont change
     chargerFootprint();
-    if(fpSource==='binance') ouvrirFpWS(a); else fermerFpWS();
+    if(fpSource==='binance') ouvrirFpSSE(a); else fermerFpSSE();
   }
 }
 
@@ -5054,7 +5070,7 @@ function majPrixCourant(){
 }
 
 window.addEventListener('beforeunload', fermerWS);
-window.addEventListener('beforeunload', fermerFpWS);
+window.addEventListener('beforeunload', fermerFpSSE);
 
 function bornesY(vue){
   vue=(vue||[]).filter(Boolean);
@@ -5262,11 +5278,19 @@ function dessiner(){
     if(!FP || !FP.barres || !FP.barres.length || !vue[0]) return;
     const taille=MINUTES_RES[res]*60000, t0=vue[0].t, pasPrix=FP.pas_prix;
     const cellPxH=Math.max(1, gH/(hi-lo)*pasPrix);
+    // Point 1 (diagnostic 2026-09-10) : mx ne balaie plus TOUT l'historique charge
+    // (jusqu'a des centaines de barres x niveaux, recalcule a chaque redessin) --
+    // seulement les barres reellement VISIBLES a l'ecran, un seul passage qui sert
+    // aussi au dessin. Le cout suit desormais la fenetre affichee, pas l'historique.
+    const visibles=[];
     let mx=1;
-    FP.barres.forEach(b=>b.niveaux.forEach(n=>{ const v=n.buy+n.sell; if(v>mx) mx=v; }));
     FP.barres.forEach(bar=>{
       const k=Math.round((bar.t-t0)/taille);
       if(k<0||k>=nCol) return;
+      visibles.push([bar,k]);
+      bar.niveaux.forEach(n=>{ const v=n.buy+n.sell; if(v>mx) mx=v; });
+    });
+    visibles.forEach(([bar,k])=>{
       const xL=k*pas, xR=(k+1)*pas, larg=Math.max(1,xR-xL-2);
       bar.niveaux.forEach(n=>{
         if(n.p<lo||n.p>hi) return;
@@ -5744,6 +5768,40 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(out).encode(), "application/json")
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
+            return
+        if path.startswith("/api/footprint/stream/"):
+            # SSE : footprint EN DIRECT, Binance uniquement (le websocket futures
+            # est filtre par certains FAI, cf. live_feed.py -- ceci relaie le
+            # polling REST cote serveur). Connexion longue duree : chaque abonne
+            # tient un thread de ThreadingHTTPServer, ca ne bloque pas les autres
+            # requetes. Un seul abonnement a la fois par onglet (le JS ferme
+            # l'ancien avant d'en ouvrir un nouveau).
+            a = path.split("/api/footprint/stream/", 1)[1].split("?")[0]
+            import urllib.parse as _up
+            a = _up.unquote(a).upper()
+            if live_feed is None:
+                self._send(503, b'{"error":"live_feed indisponible"}', "application/json")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            q = live_feed.fp_subscribe(a)
+            try:
+                import queue as _queue
+                while True:
+                    try:
+                        payload = q.get(timeout=15)
+                        self.wfile.write(("data: " + payload + "\n\n").encode("utf-8"))
+                    except _queue.Empty:
+                        self.wfile.write(b": keep-alive\n\n")   # commentaire SSE, garde la connexion ouverte
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                live_feed.fp_unsubscribe(a, q)
             return
         if path.startswith("/api/footprint/"):
             qs = self.path.split("?", 1)[1] if "?" in self.path else ""

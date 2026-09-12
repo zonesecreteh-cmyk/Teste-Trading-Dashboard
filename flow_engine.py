@@ -2644,6 +2644,16 @@ def footprint_backfill_status(asset="BTC", source="binance"):
         out[st] = out.get(st, 0) + 1
     return out
 
+def footprint_pas_prix_actuel(asset, source="binance"):
+    """Pas de prix du jour EN COURS (aujourd'hui, UTC), tel que persisté, ou None
+    si aucun fichier n'existe encore pour aujourd'hui. Existe pour que le poller
+    live (live_feed.py) n'ait JAMAIS à recalculer le pas lui-même -- il le LIT
+    ici, garantissant qu'une cellule reçue en direct s'aligne exactement sur les
+    mêmes paliers que l'historique archivé du même jour."""
+    today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+    day = _footprint_load_day(asset, source, today)
+    return day["pas_prix"] if day else None
+
 def _binance_vision_aggregate_day_streaming(asset, date_str, pas_prix_existant=None):
     """Télécharge ET agrège un jour d'archive Binance EN FLUX (rattrapage profond,
     180 jours possibles -- ne doit jamais accumuler la tape brute en mémoire) :

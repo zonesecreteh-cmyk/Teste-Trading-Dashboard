@@ -2818,7 +2818,10 @@ def _footprint_aggregate(minutes, pas_prix, res):
     (ADDENDUM_FOOTPRINT.md 8bis.C.4)."""
     if not minutes:
         return []
-    taille = int(RESOLUTIONS.get(res, ("5", 5))[1] * 60000)
+    # timeframes libres (2m/3m/7m/23m/90m...) : _parse_res_minutes accepte le
+    # motif 'Nm' en plus des resolutions standard -- la somme des minutes
+    # archivees ci-dessous marche identiquement quel que soit `taille`.
+    taille = int(_parse_res_minutes(res, defaut=5) * 60000)
     par_bar = {}
     for t in sorted(minutes):
         par_bar.setdefault((t // taille) * taille, []).append(t)
@@ -3334,14 +3337,34 @@ RESOLUTIONS = {"1m": ("1", 1), "5m": ("5", 5), "15m": ("15", 15),
                "30m": ("30", 30), "1h": ("60", 60), "2h": ("120", 120),
                "4h": ("240", 240), "12h": ("720", 720), "1j": ("1D", 1440)}
 
+_RES_MINUTES_RE = re.compile(r"^(\d+)m$")
+
+def _parse_res_minutes(res, defaut=60):
+    """Nombre de minutes d'une resolution : standard ('1h','4h','1j'...) via
+    RESOLUTIONS, OU libre ('7m','23m','90m'...) via le motif 'Nm'. Utilise par le
+    footprint (agregation = simple somme de minutes archivees) ET par
+    price_candles() (ré-échantillonnage depuis le 1m) pour tout timeframe hors de
+    la liste fixe -- jamais un code de resolution invente cote exchange."""
+    if res in RESOLUTIONS:
+        return RESOLUTIONS[res][1]
+    m = _RES_MINUTES_RE.match(res or "")
+    if m:
+        return max(1, int(m.group(1)))
+    return defaut
+
 def price_candles(asset, res="1h", bougies=5000):
     """[{t,o,h,l,c}] + metadonnees de fraicheur. Cache court (60s) pour ne pas
-    marteler l'API a chaque rafraichissement de page."""
+    marteler l'API a chaque rafraichissement de page. Resolution standard ('1h',
+    '4h','1j'...) -> requete directe Deribit. Resolution libre en minutes ('7m',
+    '23m','90m'...) -> ré-échantillonnée depuis les bougies 1m Deribit
+    (open=première, high=max, low=min, close=dernière, volume=somme) : jamais de
+    code de resolution invente envoye a l'exchange."""
     import time as _t
     cfg = ASSETS.get(asset)
     if not cfg:
         return None
-    res = res if res in RESOLUTIONS else "1h"
+    res_standard = res in RESOLUTIONS
+    minutes_cible = _parse_res_minutes(res)
     key = (asset, res)
     now = _t.time()
     c = _CANDLE_CACHE.get(key)
@@ -3350,25 +3373,55 @@ def price_candles(asset, res="1h", bougies=5000):
     out = None
     try:
         if cfg["source"] == "deribit":
-            code, minutes = RESOLUTIONS[res]
             inst = (f"{asset}_USDC-PERPETUAL" if asset in DERIBIT_LINEAR
                     else f"{asset}-PERPETUAL")
             end = int(now * 1000)
             bougies = max(50, min(bougies, 5000))
-            start = end - bougies * minutes * 60 * 1000
-            r = _deribit_get("public/get_tradingview_chart_data",
-                             instrument_name=inst, start_timestamp=start,
-                             end_timestamp=end, resolution=code)
-            ticks = r.get("ticks") or []
-            if ticks:
-                out = {"res": res, "temps_reel": True,
-                       "source": f"Deribit {inst} (temps reel)",
-                       "instrument": inst,   # nom exact pour s'abonner au flux WebSocket live
-                       "bougies": [{"t": ticks[i],
-                                    "o": r["open"][i], "h": r["high"][i],
-                                    "l": r["low"][i], "c": r["close"][i],
-                                    "v": (r.get("volume") or [None] * len(ticks))[i]}
-                                   for i in range(len(ticks))]}
+            if res_standard:
+                code, minutes = RESOLUTIONS[res]
+                start = end - bougies * minutes * 60 * 1000
+                r = _deribit_get("public/get_tradingview_chart_data",
+                                 instrument_name=inst, start_timestamp=start,
+                                 end_timestamp=end, resolution=code)
+                ticks = r.get("ticks") or []
+                if ticks:
+                    out = {"res": res, "temps_reel": True,
+                           "source": f"Deribit {inst} (temps reel)",
+                           "instrument": inst,   # nom exact pour s'abonner au flux WebSocket live
+                           "bougies": [{"t": ticks[i],
+                                        "o": r["open"][i], "h": r["high"][i],
+                                        "l": r["low"][i], "c": r["close"][i],
+                                        "v": (r.get("volume") or [None] * len(ticks))[i]}
+                                       for i in range(len(ticks))]}
+            else:
+                # timeframe libre : une page de bougies 1m (meme plafond 5000 que
+                # le standard), puis ré-échantillonnage par simple somme/min/max
+                n_1m = max(50, min(5000, bougies * minutes_cible))
+                start = end - n_1m * 60 * 1000
+                r = _deribit_get("public/get_tradingview_chart_data",
+                                 instrument_name=inst, start_timestamp=start,
+                                 end_timestamp=end, resolution="1")
+                ticks = r.get("ticks") or []
+                if ticks:
+                    taille = minutes_cible * 60000
+                    vols = r.get("volume") or [0] * len(ticks)
+                    barres = {}
+                    for i, t in enumerate(ticks):
+                        b0 = (t // taille) * taille
+                        o, h, l, cl = r["open"][i], r["high"][i], r["low"][i], r["close"][i]
+                        b = barres.get(b0)
+                        if b is None:
+                            barres[b0] = {"t": b0, "o": o, "h": h, "l": l, "c": cl, "v": vols[i] or 0}
+                        else:
+                            if h > b["h"]: b["h"] = h
+                            if l < b["l"]: b["l"] = l
+                            b["c"] = cl
+                            b["v"] = (b["v"] or 0) + (vols[i] or 0)
+                    bars_sorted = [barres[k] for k in sorted(barres)]
+                    if bars_sorted:
+                        out = {"res": res, "temps_reel": True,
+                               "source": f"Deribit {inst} (temps reel, ré-échantillonné {minutes_cible}m depuis le 1m)",
+                               "instrument": inst, "bougies": bars_sorted}
         else:
             sym = (cfg.get("cboe") or asset).lower()
             rr = requests.get(f"https://stooq.com/q/d/l/?s={sym}.us&i=d", timeout=10,

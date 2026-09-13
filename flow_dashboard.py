@@ -4636,7 +4636,7 @@ def _chart_html():
     res_btns = "".join(
         "<span class='rb{}' onclick=\"setRes('{}',this)\">{}</span>".format(
             " active" if r == "1h" else "", r, r)
-        for r in ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "12h", "1j"])
+        for r in ["1m", "5m", "15m", "1h", "4h", "1j"])
     return """<!doctype html><html lang="fr"><head><meta charset="utf-8">
 <title>Graphique \u2014 Flow Engine</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4685,11 +4685,19 @@ def _chart_html():
   <h1>\U0001F4C8 GRAPHIQUE</h1>
   <select id="asset" onchange="charger()">""" + opts + """</select>
   <span style="display:flex;gap:5px;">""" + res_btns + """</span>
+  <input id="resLibre" type="text" placeholder="ex: 23m" title="Timeframe libre : n'importe quel multiple de la minute (2m, 7m, 90m...). Entree pour valider." style="width:64px;padding:5px 8px;font-size:12.5px;" onkeydown="if(event.key==='Enter') validerResLibre()">
+  <button onclick="validerResLibre()" title="Valider le timeframe libre" style="padding:5px 9px;font-size:12.5px;">OK</button>
   <span class="rb" id="btnFootprint" onclick="basculerMode()" title="Volume reel par niveau de prix, separe acheteurs/vendeurs (tape reelle, crypto uniquement)">▦ Footprint</span>
   <span id="fpSrc" style="display:none;gap:4px;align-items:center;">
     <span class="rb active" data-src="binance" onclick="setFpSource('binance',this)" title="Reference : ~60x le volume de Deribit sur BTC">Binance</span>
     <span class="rb" data-src="deribit" onclick="setFpSource('deribit',this)" title="Comparaison uniquement, volume bien plus faible">Deribit</span>
     <span id="fpLivepoint" class="livepoint" title=""></span>
+  </span>
+  <span id="fpModeSel" style="display:none;gap:4px;align-items:center;">
+    <span class="rb" data-m="bidask" onclick="setFpMode('bidask',this)" title="Vendeurs x acheteurs dans la cellule">Bid×Ask</span>
+    <span class="rb" data-m="delta" onclick="setFpMode('delta',this)" title="Acheteurs - vendeurs, colore vert/rouge">Delta</span>
+    <span class="rb" data-m="profil" onclick="setFpMode('profil',this)" title="Barre horizontale par palier, vendeurs a gauche / acheteurs a droite">Profil</span>
+    <span class="rb" data-m="volume" onclick="setFpMode('volume',this)" title="Volume total par palier, degrade d'intensite">Volume</span>
   </span>
   <span id="prix" class="px"></span>
   <span id="livepoint" class="livepoint" title=""></span>
@@ -4717,6 +4725,7 @@ def _chart_html():
   <span class="ib" data-k="em"        onclick="basculer('em',this)"        style="--c:#00d2ff">Expected move</span>
   <span class="ib" data-k="oi"        onclick="basculer('oi',this)"        style="--c:#e8a93c">Variation OI</span>
   <span class="ib" data-k="hedge"     onclick="basculer('hedge',this)"     style="--c:#3fd07f">Zones de hedge</span>
+  <span class="ib" data-k="fpstats"   onclick="basculer('fpstats',this)"   style="--c:#00d2ff" title="Tableau Delta/Volume/Min/Max sous le graphe (mode footprint uniquement)">Stats footprint</span>
   <span class="ib" data-k="grille"    onclick="basculer('grille',this)"    style="--c:#5b6478">Grille</span>
   <span style="margin-left:auto;display:flex;gap:9px;align-items:center;color:#5b6478;font-size:12px;">
     hausse <input type="color" value="#3fd07f" oninput="setStyle('hausse',this.value)" class="col">
@@ -4742,7 +4751,7 @@ let res='1h', timer=null;
 // Chaque couche est un INDICATEUR activable, comme sur une plateforme.
 // L'etat est memorise dans le navigateur d'une session a l'autre.
 const IND_DEF={max_pain:1, flip:1, call_wall:1, put_wall:1, liq:1, profil:1, ma:0,
-               expiry:1, vol:0, grille:1, em:0, oi:0, hedge:0};
+               expiry:1, vol:0, grille:1, em:0, oi:0, hedge:0, fpstats:0};
 const STYLE_DEF={hausse:'#3fd07f', baisse:'#e0524f', grille:'#161a22', croix:'#e8e6e3'};
 let STYLE=Object.assign({}, STYLE_DEF);
 try{ const s=localStorage.getItem('flow_style'); if(s) STYLE=Object.assign(STYLE, JSON.parse(s)); }catch(e){}
@@ -4757,6 +4766,22 @@ function basculer(k, el){
 }
 let TOUT=[], NIV=[], SRC='', HIST=[], LIQEV=[];
 let modeGraphe='bougies', FP=null, fpSource='binance';   // Etape A, ADDENDUM_FOOTPRINT.md
+// Mode de rendu des cellules footprint, memorise comme les autres preferences
+// (meme motif localStorage que STYLE/IND). Bid x Ask par defaut (demande explicite
+// du 2026-09-13 : "Je veux Bid x Ask comme format de cellule par defaut, pas Delta").
+let fpMode='bidask';
+try{ const s=localStorage.getItem('flow_fpmode'); if(s) fpMode=s; }catch(e){}
+function setFpMode(m, el){
+  fpMode=m;
+  document.querySelectorAll('#fpModeSel .rb').forEach(b=>b.classList.remove('active'));
+  if(el) el.classList.add('active');
+  else { const b=document.querySelector('#fpModeSel .rb[data-m="'+m+'"]'); if(b) b.classList.add('active'); }
+  try{ localStorage.setItem('flow_fpmode', m); }catch(e){}
+  dessiner();
+}
+// synchronise le bouton actif avec la preference chargee (sans redessiner : rien
+// n'est encore charge a ce stade du script) -- dessiner() n'est pas encore appelable
+(function(){ const b=document.querySelector('#fpModeSel .rb[data-m="'+fpMode+'"]'); if(b) b.classList.add('active'); })();
 // Binance en reference par defaut (~60x le volume de Deribit sur BTC, mesure) ;
 // Deribit reste selectionnable pour comparaison ponctuelle, jamais par defaut.
 function fmtK(v){
@@ -4833,7 +4858,7 @@ function fpScheduleRedraw(){
 function traiterFpLot(pasPrix, minutesLot){
   if(!FP || !FP.barres || !pasPrix || !minutesLot) return;
   FP.pas_prix=pasPrix;   // toujours celui envoye par le serveur (archive du jour), jamais recalcule ici
-  const taille=MINUTES_RES[res]*60000;
+  const taille=resMinutes(res)*60000;
   Object.keys(minutesLot).forEach(m0str=>{
     const m0=Number(m0str), t0=Math.floor(m0/taille)*taille;
     let bar=FP.barres.find(b=>b.t===t0);
@@ -4877,6 +4902,7 @@ function basculerMode(){
   modeGraphe = (modeGraphe==='footprint') ? 'bougies' : 'footprint';
   document.getElementById('btnFootprint').classList.toggle('active', modeGraphe==='footprint');
   document.getElementById('fpSrc').style.display = (modeGraphe==='footprint') ? 'flex' : 'none';
+  document.getElementById('fpModeSel').style.display = (modeGraphe==='footprint') ? 'flex' : 'none';
   if(modeGraphe==='footprint'){
     chargerFootprint();
     if(fpSource==='binance') ouvrirFpSSE(document.getElementById('asset').value); else fermerFpSSE();
@@ -4912,7 +4938,7 @@ const ctx=cv.getContext('2d');
 function setRes(r, el){
   res=r;
   document.querySelectorAll('.rb').forEach(b=>b.classList.remove('active'));
-  if(el) el.classList.add('active');
+  if(el){ el.classList.add('active'); const lib=document.getElementById('resLibre'); if(lib) lib.value=''; }
   i0=i1=0; yMin=yMax=null;
   charger();
 }
@@ -4996,6 +5022,24 @@ async function charger(){
 // le canal .raw (chaque trade non groupe) exige un compte Deribit connecte. 100ms
 // reste indiscernable a l'oeil sur un graphique et suffit a etre "en direct".
 const MINUTES_RES={'1m':1,'5m':5,'15m':15,'30m':30,'1h':60,'2h':120,'4h':240,'12h':720,'1j':1440};
+// Timeframe libre : n'importe quel multiple de la minute ('7m','23m','90m'...),
+// pas seulement les raccourcis ci-dessus. resMinutes() est LA seule fonction a
+// utiliser pour convertir `res` en minutes cote client (jamais MINUTES_RES[res]
+// directement, qui renverrait undefined pour un timeframe libre).
+function resMinutes(res){
+  if(MINUTES_RES[res]!=null) return MINUTES_RES[res];
+  const m=/^(\\d+)m$/.exec(res||'');
+  return m ? Math.max(1,parseInt(m[1],10)) : 60;
+}
+function validerResLibre(){
+  const el=document.getElementById('resLibre');
+  const v=(el.value||'').trim().toLowerCase();
+  const m=/^(\\d+)\\s*m?$/.exec(v);
+  if(!m){ el.style.borderColor='#e0524f'; return; }
+  const n=Math.max(1, Math.min(43200, parseInt(m[1],10)));   // borne large (30j), evite un abus
+  el.style.borderColor='';
+  setRes(n+'m', null);   // setRes retire deja .active des boutons standard
+}
 
 function majPastilleLive(reco){
   const el=document.getElementById('livepoint');
@@ -5044,7 +5088,7 @@ function ouvrirWS(asset, instrument){
 }
 
 function traiterTick(t){
-  const taille=MINUTES_RES[res]*60000;
+  const taille=resMinutes(res)*60000;
   const b0=Math.floor(t.timestamp/taille)*taille;
   const dernier=TOUT[TOUT.length-1];
   if(dernier && dernier.t===b0){
@@ -5108,8 +5152,13 @@ function dessiner(){
   const reelles=vue.filter(Boolean);
   if(!reelles.length) return;
   const hVol = IND.vol ? Math.round((H-MARGE_B)*0.18) : 0;   // bandeau volume en bas
-  const gW=W-MARGE_D, gH=H-MARGE_B-hVol;
-  const bas=gH+hVol;                    // bas du trace (l'axe des dates est en dessous)
+  // Tableau de stats footprint (Delta/Volume/Min delta/Max delta), hauteur fixe
+  // (4 lignes de texte, pas une fraction de la hauteur du graphe) -- actif
+  // uniquement si l'indicateur est coche ET qu'on est bien en mode footprint.
+  const enFootprint = (modeGraphe==='footprint' && FP && FP.barres && FP.barres.length>0);
+  const hStats = (IND.fpstats && enFootprint) ? 72 : 0;
+  const gW=W-MARGE_D, gH=H-MARGE_B-hVol-hStats;
+  const bas=gH+hVol+hStats;             // bas du trace (l'axe des dates est en dessous)
   const gWc=gW-PROFIL;          // zone des bougies (le profil occupe la droite)
   const pas=gWc/nCol;
   const [lo,hi]=bornesY(vue);
@@ -5139,7 +5188,9 @@ function dessiner(){
   // (juste deplace tel quel dans une fonction nommee).
   dessinerAxes();
   dessinerZonesHedge();
-  if(modeGraphe==='footprint' && FP) dessinerFootprintCells(); else dessinerBougies();
+  dessinerBougies();                         // TOUJOURS (meches + corps) -- le footprint se superpose
+  if(enFootprint) dessinerFootprintCells();               // cellules PAR-DESSUS, jamais a la place
+  if(enFootprint && IND.fpstats) dessinerFootprintStats(); // tableau Delta/Volume/Min/Max sous le graphe
   dessinerLiquidationsReelles();
   dessinerNiveaux();
   dessinerIndicateurs();
@@ -5256,17 +5307,33 @@ function dessiner(){
   }
 
   function dessinerBougies(){
-  // --- bougies ---------------------------------------------------------------
+  // --- bougies -----------------------------------------------------------
+  // En mode footprint : le corps devient un CONTOUR (pas un remplissage) sur
+  // fond sombre, pour laisser les cellules bid x ask lisibles par-dessus --
+  // cf. dessinerFootprintCells() qui redessine ce meme contour par-dessus les
+  // cellules a la fin, pour qu'il reste net.
   const corps=Math.max(1, pas*0.68);
+  const enFP=(modeGraphe==='footprint' && FP && FP.barres && FP.barres.length>0);
   vue.forEach((b,k)=>{
     if(!b) return;
     const x=k*pas+pas/2;
     const hausse=b.c>=b.o;
-    ctx.strokeStyle=ctx.fillStyle=hausse?STYLE.hausse:STYLE.baisse;
+    const coul=hausse?STYLE.hausse:STYLE.baisse;
+    ctx.strokeStyle=coul;
     ctx.lineWidth=Math.max(1, pas*0.09);
-    ctx.beginPath(); ctx.moveTo(x,Y(b.h)); ctx.lineTo(x,Y(b.l)); ctx.stroke();   // meche
+    ctx.beginPath(); ctx.moveTo(x,Y(b.h)); ctx.lineTo(x,Y(b.l)); ctx.stroke();   // meche (toujours fine)
     const y1=Y(b.o), y2=Y(b.c);
-    ctx.fillRect(x-corps/2, Math.min(y1,y2), corps, Math.max(1,Math.abs(y2-y1)));
+    const yTop=Math.min(y1,y2), hCorps=Math.max(1,Math.abs(y2-y1));
+    if(enFP){
+      ctx.fillStyle='#0b0e14';                              // fond sombre pour lisibilite des cellules
+      ctx.fillRect(x-corps/2, yTop, corps, hCorps);
+      ctx.strokeStyle=coul;
+      ctx.lineWidth=Math.max(1.5, pas*0.1);
+      ctx.strokeRect(x-corps/2+ctx.lineWidth/2, yTop+ctx.lineWidth/2, Math.max(1,corps-ctx.lineWidth), Math.max(1,hCorps-ctx.lineWidth));
+    } else {
+      ctx.fillStyle=coul;
+      ctx.fillRect(x-corps/2, yTop, corps, hCorps);
+    }
   });
   }
 
@@ -5276,57 +5343,175 @@ function dessiner(){
   // hedge et liquidations continuent de s'afficher par-dessus sans rien changer.
   function dessinerFootprintCells(){
     if(!FP || !FP.barres || !FP.barres.length || !vue[0]) return;
-    const taille=MINUTES_RES[res]*60000, t0=vue[0].t, pasPrix=FP.pas_prix;
+    const taille=resMinutes(res)*60000, t0=vue[0].t, pasPrix=FP.pas_prix;
     const cellPxH=Math.max(1, gH/(hi-lo)*pasPrix);
+    const corps=Math.max(1, pas*0.68);   // meme largeur de corps que dessinerBougies()
     // Point 1 (diagnostic 2026-09-10) : mx ne balaie plus TOUT l'historique charge
     // (jusqu'a des centaines de barres x niveaux, recalcule a chaque redessin) --
     // seulement les barres reellement VISIBLES a l'ecran, un seul passage qui sert
     // aussi au dessin. Le cout suit desormais la fenetre affichee, pas l'historique.
     const visibles=[];
-    let mx=1;
+    let mx=1, mxDelta=1;
     FP.barres.forEach(bar=>{
       const k=Math.round((bar.t-t0)/taille);
       if(k<0||k>=nCol) return;
       visibles.push([bar,k]);
-      bar.niveaux.forEach(n=>{ const v=n.buy+n.sell; if(v>mx) mx=v; });
+      bar.niveaux.forEach(n=>{
+        const v=n.buy+n.sell; if(v>mx) mx=v;
+        const d=Math.abs(n.buy-n.sell); if(d>mxDelta) mxDelta=d;
+      });
     });
     visibles.forEach(([bar,k])=>{
-      const xL=k*pas, xR=(k+1)*pas, larg=Math.max(1,xR-xL-2);
+      const xL=k*pas, xR=(k+1)*pas, larg=Math.max(1,xR-xL-2), xC=(xL+xR)/2;
+      // Bougie co-localisee (meme index k) : sert a distinguer les cellules DANS
+      // le corps (fond sombre, pleine lisibilite) de celles dans la zone des
+      // meches (hors corps -- restent visibles mais plus discretes, alpha reduit).
+      const bougie=vue[k];
+      const corpsLo = bougie ? Math.min(bougie.o,bougie.c) : null;
+      const corpsHi = bougie ? Math.max(bougie.o,bougie.c) : null;
       bar.niveaux.forEach(n=>{
         if(n.p<lo||n.p>hi) return;
-        const yC=Y(n.p), vol=n.buy+n.sell, inten=Math.min(1,vol/mx);
-        const dom=n.buy>=n.sell;
-        ctx.globalAlpha=0.15+inten*0.55;
-        ctx.fillStyle=dom?STYLE.hausse:STYLE.baisse;
-        ctx.fillRect(xL+1, yC-cellPxH/2, larg, Math.max(1,cellPxH-1));
-        ctx.globalAlpha=1;
+        const yC=Y(n.p), yTop=yC-cellPxH/2, h=Math.max(1,cellPxH-1);
+        const vol=n.buy+n.sell;
+        const dansCorps = bougie!=null && (n.p+pasPrix/2)>=corpsLo && (n.p-pasPrix/2)<=corpsHi;
+        const attenue = enFootprint && !dansCorps ? 0.45 : 1;   // discretion en zone meche
+        // --- 4 modes de rendu (selecteur "fpModeSel", memorise en localStorage) ---
+        if(fpMode==='profil'){
+          // barre horizontale par palier : vendeurs a gauche, acheteurs a droite
+          // d'un axe central, proportionnel au max de CE palier sur la fenetre visible
+          const demi=larg/2;
+          const wSell=Math.min(demi, demi*(n.sell/mx));
+          const wBuy=Math.min(demi, demi*(n.buy/mx));
+          ctx.globalAlpha=0.85*attenue;
+          ctx.fillStyle=STYLE.baisse; ctx.fillRect(xC-wSell, yTop, wSell, h);
+          ctx.fillStyle=STYLE.hausse; ctx.fillRect(xC, yTop, wBuy, h);
+          ctx.globalAlpha=1;
+          ctx.strokeStyle='rgba(255,255,255,.25)'; ctx.lineWidth=1;
+          ctx.beginPath(); ctx.moveTo(xC,yTop); ctx.lineTo(xC,yTop+h); ctx.stroke();
+        } else if(fpMode==='volume'){
+          // volume total par palier, degrade d'intensite (PAS colore par cote dominant)
+          const inten=Math.min(1,vol/mx);
+          ctx.globalAlpha=(0.10+inten*0.75)*attenue;
+          ctx.fillStyle='#00d2ff';
+          ctx.fillRect(xL+1, yTop, larg, h);
+          ctx.globalAlpha=1;
+        } else if(fpMode==='delta'){
+          // acheteurs - vendeurs : une seule valeur signee, vert/rouge, intensite
+          // proportionnelle a |delta|
+          const d=n.buy-n.sell, inten=Math.min(1,Math.abs(d)/mxDelta);
+          ctx.globalAlpha=(0.15+inten*0.65)*attenue;
+          ctx.fillStyle=d>=0?STYLE.hausse:STYLE.baisse;
+          ctx.fillRect(xL+1, yTop, larg, h);
+          ctx.globalAlpha=1;
+        } else {
+          // 'bidask' : format classique vendeurs x acheteurs, colore par cote dominant
+          // (mode par defaut, le plus lisible pour lire directement l'absorption)
+          const inten=Math.min(1,vol/mx), dom=n.buy>=n.sell;
+          ctx.globalAlpha=(0.15+inten*0.55)*attenue;
+          ctx.fillStyle=dom?STYLE.hausse:STYLE.baisse;
+          ctx.fillRect(xL+1, yTop, larg, h);
+          ctx.globalAlpha=1;
+        }
         const estPoc=(bar.poc!=null && Math.abs(n.p-bar.poc)<pasPrix*0.5);
         if(estPoc){
+          ctx.globalAlpha=attenue;
           ctx.strokeStyle='#00d2ff'; ctx.lineWidth=1.4;
-          ctx.strokeRect(xL+1, yC-cellPxH/2, larg, Math.max(1,cellPxH-1));
+          ctx.strokeRect(xL+1, yTop, larg, h);
+          ctx.globalAlpha=1;
         }
-        if(pas>54 && cellPxH>11){
-          ctx.fillStyle='#0b0d12'; ctx.textAlign='center';
+        // texte des cellules : seulement dans le corps (zone meche = fond colore
+        // seul, sans chiffres, pour rester discrete) et si la colonne est assez large
+        if(dansCorps && fpMode!=='profil' && pas>54 && cellPxH>11){
+          ctx.fillStyle='#eef2f7'; ctx.textAlign='center';
           ctx.font='9.5px ui-monospace,Consolas,monospace';
-          ctx.fillText(fmtK(n.sell)+' × '+fmtK(n.buy), (xL+xR)/2, yC);
+          const txt = fpMode==='delta' ? (n.delta>=0?'+':'')+fmtK(n.delta)
+                    : fpMode==='volume' ? fmtK(vol)
+                    : fmtK(n.sell)+' × '+fmtK(n.buy);
+          ctx.fillText(txt, xC, yC);
           ctx.font='11.5px ui-monospace,Consolas,monospace';
         }
       });
+      // recontour du corps PAR-DESSUS les cellules, pour qu'il reste net (les
+      // cellules dans le corps auraient sinon recouvert son bord).
+      if(bougie){
+        const x=xC, hausse=bougie.c>=bougie.o, coul=hausse?STYLE.hausse:STYLE.baisse;
+        const y1=Y(bougie.o), y2=Y(bougie.c), yTop=Math.min(y1,y2), hCorps=Math.max(1,Math.abs(y2-y1));
+        ctx.strokeStyle=coul; ctx.lineWidth=Math.max(1.5, pas*0.1);
+        ctx.strokeRect(x-corps/2+ctx.lineWidth/2, yTop+ctx.lineWidth/2, Math.max(1,corps-ctx.lineWidth), Math.max(1,hCorps-ctx.lineWidth));
+      }
       // delta de la bougie, au-dessus de la colonne
       if(pas>28){
         const y0=Y(hi), dCls=bar.delta>=0?STYLE.hausse:STYLE.baisse;
         ctx.fillStyle=dCls; ctx.textAlign='center'; ctx.font='bold 10px ui-monospace,Consolas,monospace';
-        ctx.fillText((bar.delta>=0?'+':'')+fmtK(bar.delta), (xL+xR)/2, Math.max(10,y0-6));
+        ctx.fillText((bar.delta>=0?'+':'')+fmtK(bar.delta), xC, Math.max(10,y0-6));
         ctx.font='11.5px ui-monospace,Consolas,monospace';
       }
     });
+  }
+
+  // --- tableau de stats footprint sous le graphe (correction 2, demande explicite
+  // "avant la tache 3") : une colonne par bougie visible, alignee verticalement avec
+  // elle (meme xC que dessinerBougies/dessinerFootprintCells), 4 lignes fixes :
+  // Delta, Volume total, Min delta intra-barre, Max delta intra-barre. Toggle comme
+  // un indicateur (IND.fpstats), suit le zoom/pan car recalcule a chaque dessiner().
+  function dessinerFootprintStats(){
+    if(!FP || !FP.barres || !FP.barres.length || !vue[0]) return;
+    const taille=resMinutes(res)*60000, t0=vue[0].t;
+    const y0=gH+hVol, ligne=hStats/4;
+    const lignes=['Delta','Volume','Min delta','Max delta'];
+
+    // fond + separateurs horizontaux (structure toujours visible, meme si les
+    // colonnes sont trop etroites pour afficher des chiffres)
+    ctx.fillStyle='#0b0e14'; ctx.fillRect(0, y0, gW, hStats);
+    ctx.strokeStyle='#1c212b'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(0,y0+0.5); ctx.lineTo(gW,y0+0.5); ctx.stroke();
+    for(let r=1;r<=4;r++){
+      const y=y0+r*ligne;
+      ctx.beginPath(); ctx.moveTo(0,Math.round(y)+0.5); ctx.lineTo(gW,Math.round(y)+0.5); ctx.stroke();
+    }
+
+    const visibles=[];
+    FP.barres.forEach(bar=>{
+      const k=Math.round((bar.t-t0)/taille);
+      if(k<0||k>=nCol) return;
+      visibles.push([bar,k]);
+    });
+
+    const assezLarge = pas>32;
+    if(assezLarge){
+      ctx.textAlign='center'; ctx.font='9.5px ui-monospace,Consolas,monospace';
+      visibles.forEach(([bar,k])=>{
+        const xC=k*pas+pas/2;
+        const vol=bar.total_buy+bar.total_sell;
+        const vals=[bar.delta, vol, bar.min_delta, bar.max_delta];
+        for(let r=0;r<4;r++){
+          const yC=y0+r*ligne+ligne/2+3.5;
+          if(r===1){ ctx.fillStyle='#c7ccd6'; }          // volume : neutre
+          else { ctx.fillStyle=vals[r]>=0?STYLE.hausse:STYLE.baisse; }
+          const txt=(r!==1 && vals[r]>0?'+':'')+fmtK(vals[r]);
+          ctx.fillText(txt, xC, yC);
+        }
+      });
+      ctx.font='11.5px ui-monospace,Consolas,monospace';
+    }
+
+    // libellés a gauche, en survol flottant (pas de gouttiere dediee : la grille de
+    // colonnes doit rester alignee sur les bougies) avec un fond pour la lisibilite
+    ctx.textAlign='left'; ctx.font='bold 9.5px ui-monospace,Consolas,monospace';
+    lignes.forEach((lib,r)=>{
+      const yC=y0+r*ligne+ligne/2;
+      const larg=ctx.measureText(lib).width+8;
+      ctx.fillStyle='rgba(11,14,20,.88)'; ctx.fillRect(0, yC-8, larg, 16);
+      ctx.fillStyle='#9aa3b2'; ctx.fillText(lib, 3, yC+3.5);
+    });
+    ctx.font='11.5px ui-monospace,Consolas,monospace';
   }
 
   // --- vraies liquidations captees en direct (live_feed.py, OKX+Bybit) : petits
   // marqueurs sur la bougie ou elles se sont produites, pas des niveaux estimes --
   function dessinerLiquidationsReelles(){
     if(!IND.liq || !LIQEV.length || !vue[0]) return;
-    const taille=MINUTES_RES[res]*60000, t0=vue[0].t;
+    const taille=resMinutes(res)*60000, t0=vue[0].t;
     LIQEV.forEach(ev=>{
       const ts=new Date(ev.ts).getTime();
       const k=Math.round((ts-t0)/taille);

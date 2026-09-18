@@ -22,7 +22,17 @@ import requests
 import numpy as np
 from scipy.stats import norm
 
-HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
+# Dossier de reference pour TOUTES les donnees (iv_history, snapshots, rapports, footprint) --
+# jamais __file__ seul : sous PyInstaller (--onedir), __file__ des modules importes pointe
+# a l'interieur du bundle (_internal/ ou l'extraction temporaire), pas a cote de l'exe. En
+# mode "frozen", sys.executable est le seul repere fiable du dossier ou l'utilisateur a
+# decompresse le package. Tous les autres modules (daily.py, live_feed.py, collect_footprint.py,
+# deep_backfill.py, flow_dashboard.py, ...) doivent utiliser fe.BASE_DIR plutot que recalculer
+# leur propre __file__ -- sinon chacun regarderait un dossier different une fois empaquete.
+BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
+    else os.path.dirname(os.path.abspath(__file__))
+
+HIST_DIR = os.path.join(BASE_DIR, "iv_history")
 
 VERSION = "2026-08-26-k"   # affiché à chaque lancement pour vérifier qu'on a la bonne version
 
@@ -3590,7 +3600,7 @@ def _last_snap_date(directory, asset):
         return None
 
 def data_health(sentinel="BTC"):
-    snap_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+    snap_dir = os.path.join(BASE_DIR, "snapshots")
     flux = [
         ("Historique quotidien (daily.py)", _last_csv_date(os.path.join(HIST_DIR, f"{sentinel}_mensuel_dexgex.csv"))),
         ("Photos OI par strike",            _last_snap_date(OI_DIR, sentinel)),

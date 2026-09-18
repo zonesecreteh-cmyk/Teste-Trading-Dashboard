@@ -17,7 +17,7 @@ daily.py — Run quotidien automatique + RAPPORT DU MATIN.
 import os, json, datetime as dt
 import flow_engine as fe
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = fe.BASE_DIR   # jamais __file__ seul : voir le commentaire sur fe.BASE_DIR
 OUT = os.path.join(BASE, "snapshots")
 RAP = os.path.join(BASE, "rapports")
 

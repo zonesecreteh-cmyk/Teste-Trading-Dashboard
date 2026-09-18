@@ -4505,7 +4505,7 @@ HTML_B64 = (
     "T0tYICcgKyAob2s/J2Nvbm5lY3TDqSc6J29mZicpICsgJyDCtyBCeWJpdCAnICsgKGJ5Pydjb25uZWN0w6knOidvZmYnKTsKICBlbC5zdHlsZS5jb2xvciA9"
     "IChva3x8YnkpID8gJyMzZmIyN2YnIDogJyNlMDUyNGYnOwp9KS5jYXRjaCgoKT0+e30pOwo8L3NjcmlwdD4KPC9ib2R5Pgo8L2h0bWw+Cg=="
 )
-RAPPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rapports")
+RAPPORT_DIR = os.path.join(fe.BASE_DIR, "rapports")   # voir fe.BASE_DIR : jamais __file__ seul (PyInstaller)
 
 def _rapport_html(which=None):
     """Page HTML des rapports quotidiens (accessible via favori : /rapport).
@@ -6095,6 +6095,43 @@ def open_browser():
 
 
 if __name__ == "__main__":
+    # Dispatch CLI pour le package autonome (PyInstaller, section 2 de BRIEF_PACKAGE.md) :
+    # les taches planifiees appellent TOUTES le meme FlowEngine.exe avec un flag, plutot
+    # que d'avoir un .exe PyInstaller distinct par tache -- chacun re-embarquerait scipy/
+    # numpy independamment, multipliant le poids du package par 4 pour rien.
+    if len(sys.argv) > 1 and sys.argv[1] in ("--daily", "--footprint", "--backfill"):
+        mode = sys.argv[1]
+        if mode == "--daily":
+            import daily
+            daily.main()
+        elif mode == "--footprint":
+            import collect_footprint
+            collect_footprint.main()
+        elif mode == "--backfill":
+            import deep_backfill
+            deep_backfill.main()
+        sys.exit(0)
+
+    # Un serveur ecoute-t-il deja sur PORT ? (typiquement la tache planifiee "Flow watch"
+    # qui lance deja le dashboard a l'ouverture de session -- le double-clic sur le
+    # raccourci Bureau tombe alors quasi-systematiquement sur ce cas). ThreadingHTTPServer
+    # autorise SO_REUSEADDR : sans ce garde, une seconde instance se lierait quand meme sur
+    # le meme port et les requetes tomberaient au hasard sur l'une ou l'autre (double-bind
+    # deja rencontre et corrige cote watcher de dev -- meme piege ici, evite a la racine).
+    _sonde = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _sonde.settimeout(0.5)
+    try:
+        _sonde.connect(("127.0.0.1", PORT))
+        _deja_actif = True
+    except OSError:
+        _deja_actif = False
+    finally:
+        _sonde.close()
+    if _deja_actif:
+        print(f"\n  Flow Engine tourne deja sur http://localhost:{PORT} -- ouverture du navigateur.")
+        webbrowser.open(f"http://localhost:{PORT}")
+        sys.exit(0)
+
     ip = local_ip()
     print("\n  Flow Engine - dashboard")
     print(f"  Sur ce PC          : http://localhost:{PORT}")

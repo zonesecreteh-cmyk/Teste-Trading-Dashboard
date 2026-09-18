@@ -28,7 +28,7 @@ try:
 except ImportError:
     websocket = None
 
-HIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iv_history")
+HIST_DIR = fe.HIST_DIR   # meme dossier que flow_engine (voir fe.BASE_DIR pour le pourquoi)
 ASSETS = ["BTC", "ETH", "SOL", "XRP", "AVAX", "TRX", "HYPE"]
 
 _write_lock = threading.Lock()

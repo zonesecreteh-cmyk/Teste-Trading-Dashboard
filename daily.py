@@ -14,8 +14,18 @@ daily.py — Run quotidien automatique + RAPPORT DU MATIN.
 À mettre dans le Planificateur de tâches Windows, une fois par jour.
 """
 
-import os, json, datetime as dt
+import os, sys, json, datetime as dt
 import flow_engine as fe
+
+# Quand la sortie standard est redirigee vers un fichier (run_daily.bat >> daily_log.txt),
+# Python encode en CP1252 (ANSI Windows) au lieu de l'UTF-8 d'une vraie console -- des
+# caracteres comme '→' ou 'Δ' dans le rapport font alors planter le print() avec
+# 'charmap' codec can't encode. Les FICHIERS de rapport eux-memes s'ecrivent bien (deja en
+# encoding="utf-8" explicite) ; seul l'affichage console/log echouait. Vu 69 fois dans
+# daily_log.txt avant ce correctif.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 BASE = fe.BASE_DIR   # jamais __file__ seul : voir le commentaire sur fe.BASE_DIR
 OUT = os.path.join(BASE, "snapshots")

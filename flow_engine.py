@@ -2859,6 +2859,51 @@ def _footprint_aggregate(minutes, pas_prix, res):
                        "max_delta": round(max_d), "min_delta": round(min_d)})
     return barres
 
+def _footprint_aggregate_range(minutes, minute_vers_bar, ordre_bars):
+    """Comme _footprint_aggregate, mais regroupe les minutes par BOUGIE RANGE
+    (minute_vers_bar : t_minute -> [id de bougie, ...], l'id étant le 't' d'ouverture
+    de chaque bougie touchée par cette minute -- voir _construire_bougies_range) au
+    lieu d'un découpage temporel fixe. Une minute qui a fait naître plusieurs bougies
+    (volatilité dépassant taille_range plusieurs fois en 60s) voit son footprint
+    DUPLIQUÉ sur chacune -- pas de trades individuels ici pour le répartir
+    exactement, seule alternative viable à laisser certaines bougies vides par
+    construction. Même calcul par barre (POC, max/min delta intra-barre, marche
+    minute par minute). `ordre_bars` fixe l'ordre de sortie ; une bougie sans aucune
+    minute de footprint (hors archive/live) est simplement absente du résultat -- le
+    client s'aligne sur son propre tableau de bougies, une barre manquante = colonne
+    vide, pas une erreur."""
+    par_bar = {}
+    for t, bar_ids in minute_vers_bar.items():
+        if t in minutes:
+            for bar_id in bar_ids:
+                par_bar.setdefault(bar_id, []).append(t)
+    barres = []
+    for bar_id in ordre_bars:
+        mins_de_la_barre = sorted(par_bar.get(bar_id, []))
+        if not mins_de_la_barre:
+            continue
+        agg, courant, max_d, min_d = {}, 0.0, 0.0, 0.0
+        for tm in mins_de_la_barre:
+            d_min = 0.0
+            for p, (buy, sell) in minutes[tm].items():
+                cell = agg.setdefault(p, [0.0, 0.0])
+                cell[0] += buy; cell[1] += sell
+                d_min += buy - sell
+            courant += d_min
+            if courant > max_d: max_d = courant
+            if courant < min_d: min_d = courant
+        niveaux = sorted(
+            ({"p": p, "buy": round(v[0]), "sell": round(v[1]), "delta": round(v[0] - v[1])}
+             for p, v in agg.items()),
+            key=lambda x: x["p"], reverse=True)
+        tb = sum(n["buy"] for n in niveaux)
+        tsell = sum(n["sell"] for n in niveaux)
+        poc = max(niveaux, key=lambda n: n["buy"] + n["sell"])["p"] if niveaux else None
+        barres.append({"t": bar_id, "niveaux": niveaux, "total_buy": round(tb),
+                       "total_sell": round(tsell), "delta": round(tb - tsell), "poc": poc,
+                       "max_delta": round(max_d), "min_delta": round(min_d)})
+    return barres
+
 def read_footprint(asset, source, debut_ms, fin_ms):
     """Relit UNIQUEMENT les fichiers archivés (aucun appel réseau) sur [debut,fin).
     {'pas_prix':float, 'derniere_minute':int|None, 'minutes':{...}} ou None si rien
@@ -2880,6 +2925,31 @@ def read_footprint(asset, source, debut_ms, fin_ms):
     if not minutes:
         return None
     return {"pas_prix": pas_prix, "derniere_minute": max(minutes), "minutes": minutes}
+
+def _footprint_minutes_fenetre(asset, source, start_ms, now_ms, pas_prix=None):
+    """Coeur partagé par footprint() et range_footprint() : minutes archivées +
+    comblement EN DIRECT du trou entre la dernière minute stockée et maintenant.
+    Renvoie (minutes, pas_final, source_effective, n_trades_live, n_min_archivees)."""
+    archive = read_footprint(asset, source, start_ms, now_ms)
+    minutes = dict(archive["minutes"]) if archive else {}
+    pas_final = archive["pas_prix"] if archive else pas_prix
+    gap_start = (archive["derniere_minute"] + 60000) if archive else start_ms
+    n_trades_live = 0
+    if gap_start < now_ms:
+        trades = (_footprint_trades_binance(asset, gap_start, now_ms) if source == "binance"
+                  else _footprint_trades_deribit(asset, gap_start, now_ms))
+        if not trades and not minutes and source == "binance":
+            # repli si Binance ne liste pas cet actif (ex. altcoin recent)
+            trades = _footprint_trades_deribit(asset, gap_start, now_ms)
+            source = "deribit (repli, Binance indisponible pour cet actif)"
+        n_trades_live = len(trades)
+        if trades:
+            if pas_final is None:
+                pas_final = _pas_prix_pour(trades)
+            fresh = _footprint_bucket_minutes(trades, pas_final)
+            minutes.update(fresh)   # le trou ne recouvre jamais l'archive (gap_start > derniere_minute)
+    n_min_archivees = len(archive["minutes"]) if archive else 0
+    return minutes, pas_final, source, n_trades_live, n_min_archivees
 
 def footprint(asset, res="5m", heures=6, pas_prix=None, source="binance"):
     """[{t, niveaux:[{p,buy,sell,delta}] (triés prix décroissant), total_buy,
@@ -2904,31 +2974,15 @@ def footprint(asset, res="5m", heures=6, pas_prix=None, source="binance"):
     try:
         now_ms = int(now * 1000)
         start_ms = now_ms - int(heures * 3600 * 1000)
-        archive = read_footprint(asset, source, start_ms, now_ms)
-        minutes = dict(archive["minutes"]) if archive else {}
-        pas_final = archive["pas_prix"] if archive else pas_prix
-        gap_start = (archive["derniere_minute"] + 60000) if archive else start_ms
-        n_trades_live = 0
-        if gap_start < now_ms:
-            trades = (_footprint_trades_binance(asset, gap_start, now_ms) if source == "binance"
-                      else _footprint_trades_deribit(asset, gap_start, now_ms))
-            if not trades and not minutes and source == "binance":
-                # repli si Binance ne liste pas cet actif (ex. altcoin recent)
-                trades = _footprint_trades_deribit(asset, gap_start, now_ms)
-                source = "deribit (repli, Binance indisponible pour cet actif)"
-            n_trades_live = len(trades)
-            if trades:
-                if pas_final is None:
-                    pas_final = _pas_prix_pour(trades)
-                fresh = _footprint_bucket_minutes(trades, pas_final)
-                minutes.update(fresh)   # le trou ne recouvre jamais l'archive (gap_start > derniere_minute)
+        minutes, pas_final, source_eff, n_trades_live, n_min_arch = _footprint_minutes_fenetre(
+            asset, source, start_ms, now_ms, pas_prix)
         if minutes and pas_final:
             barres = _footprint_aggregate(minutes, pas_final, res)
             deribit_inst = f"{asset}_USDC-PERPETUAL" if asset in DERIBIT_LINEAR else f"{asset}-PERPETUAL"
             label = {"binance": f"Binance {asset}USDT (perpétuel, tape réelle)",
                      "deribit": f"Deribit {deribit_inst} (tape réelle)"}.get(
-                     source, f"{source} (tape réelle)")
-            archive_txt = f" · {len(archive['minutes'])} min archivées" if archive else ""
+                     source_eff, f"{source_eff} (tape réelle)")
+            archive_txt = f" · {n_min_arch} min archivées" if n_min_arch else ""
             out = {"asset": asset, "res": res, "pas_prix": pas_final,
                    "source": label + archive_txt,
                    "n_trades": n_trades_live, "barres": barres}
@@ -3457,6 +3511,207 @@ def price_candles(asset, res="1h", bougies=5000):
         out = None
     if out:
         _CANDLE_CACHE[key] = (now, out)
+    return out
+
+# --- Bougies RANGE (axe X = mouvement de prix, pas le temps) ---------------------
+# Demande explicite (2026-09-20) : les bougies temporelles rendent le footprint dur
+# à lire, et un vrai décalage a été mesuré entre les bougies (Deribit, ~81330$) et
+# les cellules footprint (Binance, ~81284$) au même instant -- ~46$ d'écart, largement
+# suffisant pour donner l'impression que "le footprint n'est pas dans la bougie".
+# Les bougies range utilisent donc la MÊME source que le footprint (klines Binance
+# 1m) : plus de décalage inter-exchange par construction.
+_RANGE_BOUGIES_CACHE = {}      # (asset,range,heures) -> (bougies, minute_vers_bar)
+_RANGE_FOOTPRINT_CACHE = {}    # (asset,range,heures,source) -> sortie de range_footprint()
+
+def _binance_klines_1m(asset, start_ms, end_ms, max_calls=40):
+    """Bougies 1 minute OHLCV Binance futures, pour reconstruire des bougies range.
+    1500 bougies max par appel (limite Binance) = 25h -> pagination par tranches,
+    en parallèle (même pattern que _footprint_trades_binance)."""
+    from concurrent.futures import ThreadPoolExecutor
+    symbol = f"{asset}USDT"
+    tranche_ms = 1500 * 60000
+    chunks, cs = [], start_ms
+    while cs < end_ms:
+        ce = min(cs + tranche_ms - 1, end_ms)
+        chunks.append((cs, ce))
+        cs = ce + 1
+    chunks = chunks[:max_calls]
+
+    def _fetch(bounds):
+        c_start, c_end = bounds
+        try:
+            r = requests.get("https://fapi.binance.com/fapi/v1/klines",
+                             params={"symbol": symbol, "interval": "1m",
+                                     "startTime": c_start, "endTime": c_end, "limit": 1500},
+                             timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            data = r.json()
+            if not isinstance(data, list):
+                return []
+            return [{"t": int(row[0]), "o": float(row[1]), "h": float(row[2]),
+                     "l": float(row[3]), "c": float(row[4]), "v": float(row[7])}
+                    for row in data]
+        except Exception:
+            return []
+
+    out = []
+    with ThreadPoolExecutor(max_workers=min(10, max(1, len(chunks)))) as ex:
+        for rows in ex.map(_fetch, chunks):
+            out.extend(rows)
+    out.sort(key=lambda c: c["t"])
+    return out
+
+def _construire_bougies_range(candles_1m, taille_range):
+    """Bougies RANGE reconstruites depuis des bougies 1m OHLC -- précision minute
+    (pas de tape tick-à-tick ici), avec interpolation linéaire entre les points
+    o/h/l/c de chaque minute pour situer le prix exact de coupure. Convention
+    standard : une bougie range se clôture dès que (high-low) atteint taille_range ;
+    la suivante s'ouvre SANS gap, au prix de clôture de la précédente.
+    Renvoie aussi `minute_vers_bar` ({t_minute: [id_bougie, ...]}, id_bougie = son
+    't' d'ouverture) -- sert à recoller le footprint (stocké minute par minute) sur
+    CES bougies-là plutôt que sur un découpage temporel fixe (combinaison
+    range+footprint, demande explicite du 2026-09-20 : "l'objectif c'est de combiner
+    footprint et range", à l'image d'un footprint range 40 ticks sur indices).
+    Une minute peut toucher PLUSIEURS bougies (volatilité dépassant taille_range
+    plusieurs fois en 60s) -- son footprint est alors dupliqué sur chacune (pas
+    de trades individuels ici pour le répartir exactement, précision minute déjà
+    acceptée). Sans ça, toute bougie née d'un découpage EN COURS de minute recevait
+    zéro footprint par construction (elle n'était jamais la bougie "active en début
+    de minute") -- repéré en test (range 50$, BTC/48h) : 39% des bougies vides."""
+    if not candles_1m or not taille_range or taille_range <= 0:
+        return [], {}
+    bougies = []
+    minute_vers_bar = {}
+    bar = None
+
+    def _ouvrir(prix, t):
+        return {"t": t, "o": prix, "h": prix, "l": prix, "c": prix, "v": 0.0}
+
+    for c1m in candles_1m:
+        o, h, l, cl = c1m["o"], c1m["h"], c1m["l"], c1m["c"]
+        t, vol = c1m["t"], (c1m.get("v") or 0)
+        # ordre plausible des points dans la minute (pas connu exactement sans tape) :
+        # on suppose que le prix passe par l'extrême le plus proche de l'ouverture en
+        # premier -- hausse -> o,l,h,c ; baisse -> o,h,l,c.
+        pts = [o, l, h, cl] if cl >= o else [o, h, l, cl]
+        sous_compteur = 0
+        if bar is None:
+            bar = _ouvrir(pts[0], t)
+        bars_cette_minute = [bar["t"]]   # toutes les bougies touchees par CETTE minute
+        bar["v"] += vol
+        prix_courant = pts[0]
+        for p1 in pts[1:]:
+            p0 = prix_courant
+            if p1 == p0:
+                continue
+            montant = p1 > p0
+            while True:
+                h_test, l_test = max(bar["h"], p1), min(bar["l"], p1)
+                if h_test - l_test < taille_range:
+                    bar["h"], bar["l"], bar["c"] = h_test, l_test, p1
+                    prix_courant = p1
+                    break
+                prix_coupe = (bar["l"] + taille_range) if montant else (bar["h"] - taille_range)
+                bar["h"] = max(bar["h"], prix_coupe)
+                bar["l"] = min(bar["l"], prix_coupe)
+                bar["c"] = prix_coupe
+                bougies.append(bar)
+                sous_compteur += 1
+                # 't' UNIQUE meme si plusieurs bougies s'ouvrent dans la MEME minute
+                # source -- decalage de quelques ms, invisible sur les dates affichees,
+                # mais indispensable : ce 't' sert d'identifiant stable cote client
+                # (mapping footprint<->bougie par egalite exacte) et DEUX bougies avec
+                # le meme 't' se seraient ecrasees l'une l'autre.
+                bar = _ouvrir(prix_coupe, t + sous_compteur)
+                bars_cette_minute.append(bar["t"])
+                prix_courant = prix_coupe
+        minute_vers_bar[t] = bars_cette_minute
+    if bar is not None:
+        bougies.append(bar)
+    return bougies, minute_vers_bar
+
+def _bougies_range_cachees(asset, taille_range, heures):
+    """(bougies, minute_vers_bar) mis en cache 60s -- PARTAGÉ entre range_candles()
+    et range_footprint() pour ne récupérer les klines Binance 1m qu'UNE fois même
+    quand le client demande les deux en parallèle (combinaison range+footprint)."""
+    import time as _t
+    now = _t.time()
+    key = (asset, taille_range, heures)
+    c = _RANGE_BOUGIES_CACHE.get(key)
+    if c and now - c[0] < 60:
+        return c[1]
+    now_ms = int(now * 1000)
+    start_ms = now_ms - int(max(1, min(720, heures)) * 3600 * 1000)
+    klines = _binance_klines_1m(asset, start_ms, now_ms)
+    result = _construire_bougies_range(klines, taille_range) if klines else ([], {})
+    _RANGE_BOUGIES_CACHE[key] = (now, result)
+    return result
+
+def range_candles(asset, taille_range, heures=48):
+    """Bougies RANGE pour un actif crypto (Binance), axe X = mouvement de prix.
+    `heures` borne juste la fenêtre de klines 1m récupérée -- le nombre de bougies
+    range produites dépend de la volatilité réelle sur cette fenêtre, pas de `heures`
+    directement."""
+    cfg = ASSETS.get(asset)
+    if not cfg or cfg.get("source") != "deribit":   # même filtre "actif crypto" que footprint()
+        return None
+    try:
+        taille_range = float(taille_range)
+    except (TypeError, ValueError):
+        return None
+    if taille_range <= 0:
+        return None
+    out = None
+    try:
+        bougies, _ = _bougies_range_cachees(asset, taille_range, heures)
+        if bougies:
+            out = {"range": taille_range, "temps_reel": True,
+                   "source": f"Binance {asset}USDT (bougies range {taille_range}$, reconstruites depuis le 1m)",
+                   "bougies": bougies}
+    except Exception:
+        out = None
+    return out
+
+def range_footprint(asset, taille_range, heures=48, source="binance"):
+    """Footprint (order flow) attribué aux MÊMES bougies range que range_candles()
+    (pas un découpage temporel) -- combinaison range+footprint demandée explicitement
+    (ex. footprint range 40 ticks sur indices -> équivalent crypto ici en $ de
+    mouvement, calculé sur les MÊMES klines 1m Binance que les bougies elles-mêmes :
+    plus de décalage de prix inter-exchange possible entre bougie et cellules)."""
+    cfg = ASSETS.get(asset)
+    if not cfg or cfg.get("source") != "deribit":
+        return None
+    try:
+        taille_range = float(taille_range)
+    except (TypeError, ValueError):
+        return None
+    if taille_range <= 0:
+        return None
+    source = source if source in ("binance", "deribit") else "binance"
+    import time as _t
+    now = _t.time()
+    key = (asset, taille_range, heures, source)
+    c = _RANGE_FOOTPRINT_CACHE.get(key)
+    if c and now - c[0] < 60:
+        return c[1]
+    out = None
+    try:
+        bougies, minute_vers_bar = _bougies_range_cachees(asset, taille_range, heures)
+        if bougies:
+            now_ms = int(now * 1000)
+            start_ms = now_ms - int(max(1, min(720, heures)) * 3600 * 1000)
+            minutes, pas_final, source_eff, n_trades_live, n_min_arch = _footprint_minutes_fenetre(
+                asset, source, start_ms, now_ms)
+            if minutes and pas_final:
+                ordre_bars = [b["t"] for b in bougies]
+                barres = _footprint_aggregate_range(minutes, minute_vers_bar, ordre_bars)
+                label = {"binance": f"Binance {asset}USDT (perpétuel, tape réelle)",
+                         "deribit": f"Deribit (tape réelle)"}.get(source_eff, f"{source_eff} (tape réelle)")
+                archive_txt = f" · {n_min_arch} min archivées" if n_min_arch else ""
+                out = {"asset": asset, "range": taille_range, "pas_prix": pas_final,
+                       "source": label + archive_txt, "n_trades": n_trades_live, "barres": barres}
+    except Exception:
+        out = None
+    _RANGE_FOOTPRINT_CACHE[key] = (now, out)
     return out
 
 # === Volume : options (flux d'attention) + sous-jacent (crédibilité du move) ======

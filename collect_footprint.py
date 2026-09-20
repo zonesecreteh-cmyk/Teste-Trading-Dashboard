@@ -13,7 +13,13 @@ Source : Binance (référence, l'essentiel du volume réel). Deribit n'est PAS
 collecté ici : il reste une source de comparaison ponctuelle à la demande, pas
 un historique à accumuler (cf. flow_engine.footprint(), section 7 de l'addendum).
 
-À mettre dans le Planificateur de tâches Windows, toutes les 2 heures.
+À mettre dans le Planificateur de tâches Windows, toutes les 15 minutes (resserré
+le 2026-09-20 : un intervalle de 2h laissait l'archive du jour jusqu'à 2h en
+retard, ce que footprint() doit alors rattraper en LIVE à chaque requête -- c'est
+la cause du chargement lent du mode footprint, pas la résolution demandée. Un
+intervalle plus court réduit mécaniquement ce trou, donc le temps de chargement
+à froid. Un run manqué (PC éteint/en veille) laisse un trou qui ne se rattrape
+qu'au prochain deep_backfill sur ce jour-là -- voir footprint_backfill_status()).
 Silencieux par design (échec réseau = skip) : la fraîcheur du collecteur est
 visible sur le dashboard via data_health() (carte « Santé des collecteurs »),
 pas ici.
@@ -21,10 +27,10 @@ pas ici.
 import sys, os, datetime as dt
 import flow_engine as fe
 
-# 150 min = 2h30 : l'intervalle de la tâche (2h) + 30 min de marge contre un run
-# en retard ou manqué. L'idempotence stricte de record_footprint() rend ce
-# recouvrement gratuit (jamais de double comptage).
-FENETRE_MIN = 150
+# 35 min = intervalle de la tâche (15 min) x2 + marge, pour absorber UN run manqué
+# sans se faire distancer. L'idempotence stricte de record_footprint() rend le
+# recouvrement gratuit (jamais de double comptage) -- pas besoin de plus.
+FENETRE_MIN = 35
 
 
 def main():

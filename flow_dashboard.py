@@ -4687,6 +4687,9 @@ def _chart_html():
   <span style="display:flex;gap:5px;">""" + res_btns + """</span>
   <input id="resLibre" type="text" placeholder="ex: 23m" title="Timeframe libre : n'importe quel multiple de la minute (2m, 7m, 90m...). Entree pour valider." style="width:64px;padding:5px 8px;font-size:12.5px;" onkeydown="if(event.key==='Enter') validerResLibre()">
   <button onclick="validerResLibre()" title="Valider le timeframe libre" style="padding:5px 9px;font-size:12.5px;">OK</button>
+  <span class="rb" id="btnRange" onclick="basculerRange()" title="Bougies RANGE : axe horizontal = mouvement de prix, pas le temps (crypto Binance uniquement)">◆ Range</span>
+  <input id="rangeTaille" type="text" placeholder="ex: 50" title="Taille de la range en $ (mouvement de prix par bougie). Entree pour valider." style="width:56px;padding:5px 8px;font-size:12.5px;display:none;" onkeydown="if(event.key==='Enter') validerRange()">
+  <button id="btnRangeOK" onclick="validerRange()" title="Valider la taille de range" style="padding:5px 9px;font-size:12.5px;display:none;">OK</button>
   <span class="rb" id="btnFootprint" onclick="basculerMode()" title="Volume reel par niveau de prix, separe acheteurs/vendeurs (tape reelle, crypto uniquement)">▦ Footprint</span>
   <span id="fpSrc" style="display:none;gap:4px;align-items:center;">
     <span class="rb active" data-src="binance" onclick="setFpSource('binance',this)" title="Reference : ~60x le volume de Deribit sur BTC">Binance</span>
@@ -4790,11 +4793,41 @@ function fmtK(v){
   if(a>=1e3) return Math.round(v/1e3)+'K';
   return Math.round(v);
 }
+// Prix du ticker d'entete (#prix) : independant du zoom du graphe (pas de decPrix
+// disponible ici), donc decimales deduites de l'ordre de grandeur du prix lui-meme.
+// Sans ca, un prix arrondi a l'entier est illisible sur un actif a faible valeur
+// (XRP ~1,37$ affiche "1" -- toute variation perdue), alors que BTC (~75000$) n'a
+// jamais montre le probleme, d'ou le signalement tardif.
+function fmtPrixTicker(v){
+  const a=Math.abs(v);
+  const dec = a>=1000?0 : a>=100?1 : a>=10?2 : a>=1?4 : a>=0.01?6 : 8;
+  return v.toLocaleString('fr-FR',{minimumFractionDigits:dec,maximumFractionDigits:dec});
+}
 async function chargerFootprint(){
   const a=document.getElementById('asset').value;
   const src=document.getElementById('src');
   try{
-    FP = await fetch('/api/footprint/'+encodeURIComponent(a)+'?res='+res+'&heures=6&source='+fpSource).then(r=>r.json());
+    // La fenetre demandee doit couvrir TOUTE la plage de bougies actuellement visible
+    // (i1-i0), pas une constante fixe de 6h -- sinon la quasi-totalite des bougies
+    // affichees (vue par defaut : 120 bougies, souvent bien plus que 6h) n'a tout
+    // simplement aucune donnee footprint (colonnes vides). Symptome remonte comme
+    // "le footprint ne s'affiche pas sur toutes les bougies". L'archive va jusqu'a
+    // 180 jours (deep_backfill) donc pas de plafond serveur a redouter -- juste un
+    // garde-fou cote client (720h = 30j) pour eviter une requete demesuree si on
+    // zoome tres loin en arriere sur une resolution large (1j...).
+    // En mode range, la fenetre "heures" n'a plus le meme sens (le nombre de
+    // bougies depend de la volatilite, pas du temps) -- on reprend simplement le
+    // meme defaut que range_candles() (168h) cote serveur, ce qui les fait taper
+    // sur le MEME cache partage (_bougies_range_cachees) : une seule recuperation
+    // de klines Binance pour les deux appels, pas de fenetre a recalculer ici.
+    const urlFp = modeRange
+      ? '/api/footprint_range/'+encodeURIComponent(a)+'?range='+tailleRange+'&source='+fpSource
+      : (()=>{
+          const nVisible = Math.max(MIN_VUE, i1-i0);
+          const heures = Math.min(720, Math.ceil(nVisible*resMinutes(res)/60) + 1);
+          return '/api/footprint/'+encodeURIComponent(a)+'?res='+res+'&heures='+heures+'&source='+fpSource;
+        })();
+    FP = await fetch(urlFp).then(r=>r.json());
     if(!FP) src.textContent='· footprint indisponible (macro, ou aucun trade sur la fenetre)';
   }catch(e){ FP=null; }
   dessiner();
@@ -4898,6 +4931,24 @@ function setFpSource(s, el){
     if(fpSource==='binance') ouvrirFpSSE(document.getElementById('asset').value); else fermerFpSSE();
   }
 }
+// Range et Footprint se COMBINENT (demande explicite du 2026-09-20 : "l'objectif
+// c'est de combiner footprint et range", a l'image d'un footprint range 40 ticks
+// sur indices) -- le footprint en mode range est attribue aux MEMES bougies range
+// par le serveur (range_footprint(), alignement par egalite exacte de 't', pas par
+// arithmetique de pas de temps fixe -- voir chargerFootprint()/dessinerFootprintCells()).
+// Seule vraie limite : le LIVE (SSE) du footprint reste time-based (traiterFpLot()
+// bucketise par resMinutes(res)), ce qui n'a pas de sens sur des bougies range --
+// SSE ferme en mode range, le footprint s'y rafraichit par rechargement, pas tick
+// par tick. Range reste en revanche exclusif du choix d'un TIMEFRAME (les deux
+// definissent l'axe X autrement) : choisir un timeframe eteint le mode range.
+let modeRange=false, tailleRange=50;
+function _eteindreRange(){
+  if(!modeRange) return;
+  modeRange=false;
+  document.getElementById('btnRange').classList.remove('active');
+  document.getElementById('rangeTaille').style.display='none';
+  document.getElementById('btnRangeOK').style.display='none';
+}
 function basculerMode(){
   modeGraphe = (modeGraphe==='footprint') ? 'bougies' : 'footprint';
   document.getElementById('btnFootprint').classList.toggle('active', modeGraphe==='footprint');
@@ -4905,11 +4956,42 @@ function basculerMode(){
   document.getElementById('fpModeSel').style.display = (modeGraphe==='footprint') ? 'flex' : 'none';
   if(modeGraphe==='footprint'){
     chargerFootprint();
-    if(fpSource==='binance') ouvrirFpSSE(document.getElementById('asset').value); else fermerFpSSE();
+    if(!modeRange && fpSource==='binance') ouvrirFpSSE(document.getElementById('asset').value);
+    else fermerFpSSE();
   } else {
     fermerFpSSE();
     dessiner();
   }
+}
+function basculerRange(){
+  modeRange=!modeRange;
+  document.getElementById('btnRange').classList.toggle('active', modeRange);
+  document.getElementById('rangeTaille').style.display = modeRange?'inline-block':'none';
+  document.getElementById('btnRangeOK').style.display = modeRange?'inline-block':'none';
+  if(modeRange){
+    const el=document.getElementById('rangeTaille');
+    if(!el.value) el.value=tailleRange;
+    if(modeGraphe==='footprint') fermerFpSSE();   // plus de live en range, le rechargement suffit
+  } else if(modeGraphe==='footprint' && fpSource==='binance'){
+    ouvrirFpSSE(document.getElementById('asset').value);   // retour au temporel : live de nouveau pertinent
+  }
+  i0=i1=0; yMin=yMax=null;
+  charger();
+}
+function validerRange(){
+  const v=parseFloat(document.getElementById('rangeTaille').value);
+  if(!(v>0)){ document.getElementById('rangeTaille').style.borderColor='#e0524f'; return; }
+  document.getElementById('rangeTaille').style.borderColor='';
+  tailleRange=v;
+  if(!modeRange){
+    modeRange=true;
+    document.getElementById('btnRange').classList.add('active');
+    document.getElementById('rangeTaille').style.display='inline-block';
+    document.getElementById('btnRangeOK').style.display='inline-block';
+    if(modeGraphe==='footprint') fermerFpSSE();
+  }
+  i0=i1=0; yMin=yMax=null;
+  charger();
 }
 // HIST = valeurs des niveaux jour par jour (max pain, flip, murs) telles qu'elles
 // etaient CE JOUR-LA. Elles evoluent : on les trace en escalier le long du temps,
@@ -4937,6 +5019,7 @@ const ctx=cv.getContext('2d');
 
 function setRes(r, el){
   res=r;
+  _eteindreRange();   // un timeframe choisi = retour aux bougies temporelles
   document.querySelectorAll('.rb').forEach(b=>b.classList.remove('active'));
   if(el){ el.classList.add('active'); const lib=document.getElementById('resLibre'); if(lib) lib.value=''; }
   i0=i1=0; yMin=yMax=null;
@@ -4955,8 +5038,11 @@ async function charger(){
   src.textContent='chargement\u2026';
   let bg=null, meta='', d={}, instrument=null;
   try{
+    const urlCandles = modeRange
+      ? '/api/candles_range/'+encodeURIComponent(a)+'?range='+tailleRange
+      : '/api/candles/'+encodeURIComponent(a)+'?res='+res;
     const [rc, rd, rn, rl] = await Promise.all([
-      fetch('/api/candles/'+encodeURIComponent(a)+'?res='+res).then(r=>r.json()),
+      fetch(urlCandles).then(r=>r.json()),
       fetch('/api/'+encodeURIComponent(a)).then(r=>r.json()),
       fetch('/api/niveaux/'+encodeURIComponent(a)).then(r=>r.json()).catch(()=>[]),
       fetch('/api/liq_events/'+encodeURIComponent(a)).then(r=>r.json()).catch(()=>[])
@@ -4966,7 +5052,11 @@ async function charger(){
     HIST = Array.isArray(rn) ? rn : [];
     LIQEV = Array.isArray(rl) ? rl : [];
   }catch(e){ console.error(e); }
-  if(!bg){ src.textContent='bougies indisponibles pour cet actif / cette r\u00e9solution'; fermerWS(); return; }
+  if(!bg){
+    src.textContent = modeRange ? 'bougies range indisponibles (crypto Binance uniquement)'
+                                 : 'bougies indisponibles pour cet actif / cette r\u00e9solution';
+    fermerWS(); return;
+  }
 
   // ---- flux live Deribit : uniquement les actifs crypto (temps reel), pas le CBOE
   // (differe 15 min, aucune source gratuite en direct). Un seul WS par instrument :
@@ -5007,7 +5097,7 @@ async function charger(){
   const der=TOUT[TOUT.length-1], prem=TOUT[i0]||TOUT[0];
   dernierPrix=der.c;
   const pe=document.getElementById('prix');
-  pe.textContent=der.c.toLocaleString('fr-FR');
+  pe.textContent=fmtPrixTicker(der.c);
   pe.style.color=der.c>=prem.o?'#3fd07f':'#e0524f';
   src.textContent='\u00b7 '+SRC;
   dessiner();
@@ -5108,7 +5198,7 @@ function majPrixCourant(){
   if(dernierPrix==null) return;
   const prem=TOUT[i0]||TOUT[0];
   const pe=document.getElementById('prix');
-  pe.textContent=dernierPrix.toLocaleString('fr-FR');
+  pe.textContent=fmtPrixTicker(dernierPrix);
   pe.style.color=dernierPrix>=(prem?prem.o:dernierPrix)?'#3fd07f':'#e0524f';
   pe.classList.remove('flash'); void pe.offsetWidth; pe.classList.add('flash');
 }
@@ -5156,13 +5246,25 @@ function dessiner(){
   // (4 lignes de texte, pas une fraction de la hauteur du graphe) -- actif
   // uniquement si l'indicateur est coche ET qu'on est bien en mode footprint.
   const enFootprint = (modeGraphe==='footprint' && FP && FP.barres && FP.barres.length>0);
-  const hStats = (IND.fpstats && enFootprint) ? 72 : 0;
+  const hStats = (IND.fpstats && enFootprint) ? 88 : 0;   // 4 lignes a 11px (etait 9.5px, illisible)
   const gW=W-MARGE_D, gH=H-MARGE_B-hVol-hStats;
   const bas=gH+hVol+hStats;             // bas du trace (l'axe des dates est en dessous)
   const gWc=gW-PROFIL;          // zone des bougies (le profil occupe la droite)
   const pas=gWc/nCol;
   const [lo,hi]=bornesY(vue);
   const Y=p=>gH-(p-lo)/(hi-lo)*gH;
+
+  // Nombre de decimales a afficher pour un prix, deduit du pas "rond" de l'axe (1/2/
+  // 2.5/5 x puissance de 10, comme sur une plateforme) -- PARTAGE par toutes les
+  // etiquettes de prix (axe, epingles hors champ, niveaux, curseur, prix courant),
+  // pas seulement l'axe. Avant ce partage, tout le reste utilisait Math.round(...) qui
+  // arrondit a l'entier : invisible sur BTC (~75000$, l'entier suffit), mais illisible
+  // sur un actif a faible prix comme XRP (~1,37$ arrondi a "1" -- toute variation perdue).
+  const brutDec=(hi-lo)/11;
+  const exDec=Math.pow(10, Math.floor(Math.log10(brutDec)));
+  const pasYDec=[1,2,2.5,5,10].map(v=>v*exDec).find(v=>v>=brutDec)||10*exDec;
+  const decPrix=pasYDec<1?Math.min(6,Math.ceil(-Math.log10(pasYDec))):0;
+  const fmtPrix=v=>v.toLocaleString('fr-FR',{minimumFractionDigits:decPrix,maximumFractionDigits:decPrix});
 
   // niveau hors echelle : on l'epingle en haut/bas du graphe avec une fleche et sa
   // valeur (comme TradingView), au lieu de le faire disparaitre purement et simplement.
@@ -5176,7 +5278,7 @@ function dessiner(){
     ctx.fillStyle=coul; ctx.fillRect(gW, y-8, MARGE_D, 16);
     ctx.fillStyle='#0b0d12'; ctx.textAlign='left';
     ctx.font='bold 11px ui-monospace,Consolas,monospace';
-    ctx.fillText((haut?'▲':'▼')+(estime?'≈':'')+Math.round(v).toLocaleString('fr-FR'), gW+1, y);
+    ctx.fillText((haut?'▲':'▼')+(estime?'≈':'')+fmtPrix(v), gW+1, y);
     ctx.font='11.5px ui-monospace,Consolas,monospace';
   }
 
@@ -5201,17 +5303,15 @@ function dessiner(){
   // --- grille + axe des prix -------------------------------------------------
   ctx.font='11.5px ui-monospace,Consolas,monospace';
   ctx.textBaseline='middle';
-  // pas "rond" : 1/2/2.5/5 x puissance de 10, comme sur une plateforme
-  const brut=(hi-lo)/11;
-  const ex=Math.pow(10, Math.floor(Math.log10(brut)));
-  const pasY=[1,2,2.5,5,10].map(v=>v*ex).find(v=>v>=brut)||10*ex;
-  const dec=pasY<1?Math.min(6,Math.ceil(-Math.log10(pasY))):0;
-  for(let p=Math.ceil(lo/pasY)*pasY; p<=hi; p+=pasY){
+  // pas "rond" : 1/2/2.5/5 x puissance de 10, comme sur une plateforme (pasYDec/decPrix
+  // calcules une seule fois en haut de dessiner(), partages avec toutes les autres
+  // etiquettes de prix -- voir le commentaire pres de decPrix)
+  for(let p=Math.ceil(lo/pasYDec)*pasYDec; p<=hi; p+=pasYDec){
     const y=Y(p);
     if(IND.grille){ ctx.strokeStyle=STYLE.grille; ctx.lineWidth=1;
       ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(gWc,y); ctx.stroke(); }
     ctx.fillStyle='#5b6478'; ctx.textAlign='left';
-    ctx.fillText(p.toLocaleString('fr-FR',{minimumFractionDigits:dec,maximumFractionDigits:dec}), gW+7, y);
+    ctx.fillText(fmtPrix(p), gW+7, y);
   }
   // --- axe des dates ---------------------------------------------------------
   ctx.textAlign='center';
@@ -5320,15 +5420,22 @@ function dessiner(){
     const hausse=b.c>=b.o;
     const coul=hausse?STYLE.hausse:STYLE.baisse;
     ctx.strokeStyle=coul;
-    ctx.lineWidth=Math.max(1, pas*0.09);
-    ctx.beginPath(); ctx.moveTo(x,Y(b.h)); ctx.lineTo(x,Y(b.l)); ctx.stroke();   // meche (toujours fine)
+    // meche : largeur FIXE (pas proportionnelle a pas*...) -- meme correctif que le
+    // contour du corps : en mode range, pas est souvent large et pas*0.09 epaississait
+    // la meche au lieu de rester un trait fin ("la meche doit etre plus fine").
+    ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x,Y(b.h)); ctx.lineTo(x,Y(b.l)); ctx.stroke();
     const y1=Y(b.o), y2=Y(b.c);
     const yTop=Math.min(y1,y2), hCorps=Math.max(1,Math.abs(y2-y1));
     if(enFP){
       ctx.fillStyle='#0b0e14';                              // fond sombre pour lisibilite des cellules
       ctx.fillRect(x-corps/2, yTop, corps, hCorps);
       ctx.strokeStyle=coul;
-      ctx.lineWidth=Math.max(1.5, pas*0.1);
+      // contour FIN, largeur fixe (pas proportionnelle a pas*...) -- en mode range,
+      // pas est souvent large (peu de bougies visibles) et un contour a pas*0.1
+      // devenait epais au point de manger toute la largeur de la bougie ("trop
+      // epaisses, devrait etre plus fin", demande explicite du 2026-09-20).
+      ctx.lineWidth=1.5;
       ctx.strokeRect(x-corps/2+ctx.lineWidth/2, yTop+ctx.lineWidth/2, Math.max(1,corps-ctx.lineWidth), Math.max(1,hCorps-ctx.lineWidth));
     } else {
       ctx.fillStyle=coul;
@@ -5343,37 +5450,76 @@ function dessiner(){
   // hedge et liquidations continuent de s'afficher par-dessus sans rien changer.
   function dessinerFootprintCells(){
     if(!FP || !FP.barres || !FP.barres.length || !vue[0]) return;
-    const taille=resMinutes(res)*60000, t0=vue[0].t, pasPrix=FP.pas_prix;
-    const cellPxH=Math.max(1, gH/(hi-lo)*pasPrix);
+    const pasPrix=FP.pas_prix;
     const corps=Math.max(1, pas*0.68);   // meme largeur de corps que dessinerBougies()
+    // Pas d'AFFICHAGE adaptatif : le zoom VERTICAL (echelle de prix) fixe combien de
+    // pixels represente pasPrix (le pas BRUT, fixe cote serveur) -- dezoome en prix,
+    // ce pas devient minuscule et le texte bid x ask disparait, INDEPENDAMMENT du
+    // zoom horizontal (nombre de bougies), ce qui etait precisement le probleme
+    // remonte le 2026-09-20 : "je suis oblige de zoomer haut-bas pour voir mon bid
+    // ask, gauche-droite ca fait rien". Solution : regrouper plusieurs paliers bruts
+    // en un seul niveau d'AFFICHAGE des que necessaire pour garder une hauteur de
+    // ligne lisible, comme l'axe des prix le fait deja pour ses graduations
+    // (pasYDec/decPrix) -- meme principe, applique ici aux cellules.
+    const MIN_CELL_PX=15;
+    const pxParDollar=Math.max(1e-9, gH/(hi-lo));
+    const facteurGroupe=Math.max(1, Math.ceil(MIN_CELL_PX/(pxParDollar*pasPrix)));
+    const pasAff=pasPrix*facteurGroupe;
+    const cellPxH=Math.max(1, pxParDollar*pasAff);
+    // Mapping bougie<->footprint par EGALITE EXACTE de 't' (via une Map construite une
+    // fois), pas par arithmetique de pas de temps fixe -- indispensable en mode range
+    // (bougies a espacement IRREGULIER, resMinutes(res) n'a alors aucun sens) et tout
+    // aussi correct en mode temporel classique (les 't' des deux cotes sont deja alignes
+    // par le serveur). Voir range_footprint()/_footprint_aggregate_range() cote serveur.
+    const mapT=new Map();
+    vue.forEach((b,k)=>{ if(b) mapT.set(b.t,k); });
     // Point 1 (diagnostic 2026-09-10) : mx ne balaie plus TOUT l'historique charge
     // (jusqu'a des centaines de barres x niveaux, recalcule a chaque redessin) --
     // seulement les barres reellement VISIBLES a l'ecran, un seul passage qui sert
     // aussi au dessin. Le cout suit desormais la fenetre affichee, pas l'historique.
+    // Les niveaux BRUTS de chaque barre sont regroupes en paliers d'AFFICHAGE ICI (une
+    // seule fois par barre), et mx/mxDelta sont calcules sur ces paliers regroupes
+    // (pas les niveaux bruts) pour une echelle d'intensite coherente avec ce qui est
+    // reellement dessine.
     const visibles=[];
     let mx=1, mxDelta=1;
     FP.barres.forEach(bar=>{
-      const k=Math.round((bar.t-t0)/taille);
-      if(k<0||k>=nCol) return;
-      visibles.push([bar,k]);
+      const k=mapT.get(bar.t);
+      if(k===undefined) return;
+      const groupes=new Map();
       bar.niveaux.forEach(n=>{
+        const key=Math.round(n.p/pasAff);
+        const g=groupes.get(key);
+        if(g){ g.buy+=n.buy; g.sell+=n.sell; g.delta=g.buy-g.sell; }
+        else groupes.set(key, {p:key*pasAff, buy:n.buy, sell:n.sell, delta:n.buy-n.sell});
+      });
+      visibles.push([bar,k,groupes]);
+      groupes.forEach(n=>{
         const v=n.buy+n.sell; if(v>mx) mx=v;
         const d=Math.abs(n.buy-n.sell); if(d>mxDelta) mxDelta=d;
       });
     });
-    visibles.forEach(([bar,k])=>{
+    visibles.forEach(([bar,k,groupes])=>{
       const xL=k*pas, xR=(k+1)*pas, larg=Math.max(1,xR-xL-2), xC=(xL+xR)/2;
       // Bougie co-localisee (meme index k) : sert a distinguer les cellules DANS
       // le corps (fond sombre, pleine lisibilite) de celles dans la zone des
       // meches (hors corps -- restent visibles mais plus discretes, alpha reduit).
       const bougie=vue[k];
-      const corpsLo = bougie ? Math.min(bougie.o,bougie.c) : null;
-      const corpsHi = bougie ? Math.max(bougie.o,bougie.c) : null;
-      bar.niveaux.forEach(n=>{
-        if(n.p<lo||n.p>hi) return;
+      if(!bougie) return;
+      const corpsLo = Math.min(bougie.o,bougie.c);
+      const corpsHi = Math.max(bougie.o,bougie.c);
+      // Grille CONTINUE : un niveau d'AFFICHAGE (pasAff, >= pasPrix) sur TOUTE la
+      // hauteur de la bougie (meche comprise), meme sans aucun trade -- avant, seuls
+      // les niveaux ayant reellement du volume etaient dessines, laissant des trous
+      // visibles a l'interieur de la bougie.
+      const pLo=Math.max(lo, bougie.l), pHi=Math.min(hi, bougie.h);
+      const iDebut=Math.ceil(pLo/pasAff);
+      const iFin=Math.min(Math.floor(pHi/pasAff), iDebut+2000);   // garde-fou, cas pathologique
+      for(let i=iDebut; i<=iFin; i++){
+        const n=groupes.get(i) || {p:i*pasAff, buy:0, sell:0, delta:0};
         const yC=Y(n.p), yTop=yC-cellPxH/2, h=Math.max(1,cellPxH-1);
         const vol=n.buy+n.sell;
-        const dansCorps = bougie!=null && (n.p+pasPrix/2)>=corpsLo && (n.p-pasPrix/2)<=corpsHi;
+        const dansCorps = bougie!=null && (n.p+pasAff/2)>=corpsLo && (n.p-pasAff/2)<=corpsHi;
         const attenue = enFootprint && !dansCorps ? 0.45 : 1;   // discretion en zone meche
         // --- 4 modes de rendu (selecteur "fpModeSel", memorise en localStorage) ---
         if(fpMode==='profil'){
@@ -5404,39 +5550,59 @@ function dessiner(){
           ctx.fillRect(xL+1, yTop, larg, h);
           ctx.globalAlpha=1;
         } else {
-          // 'bidask' : format classique vendeurs x acheteurs, colore par cote dominant
-          // (mode par defaut, le plus lisible pour lire directement l'absorption)
-          const inten=Math.min(1,vol/mx), dom=n.buy>=n.sell;
-          ctx.globalAlpha=(0.15+inten*0.55)*attenue;
-          ctx.fillStyle=dom?STYLE.hausse:STYLE.baisse;
+          // 'bidask' (par defaut) : fond NEUTRE partout, pas de quadrillage cellule
+          // par cellule, et pas de cadre pour le desequilibre non plus -- le cadre
+          // colore est RESERVE au POC (demande explicite du 2026-09-20 : "je veux
+          // pas de carre, le carre c'est reserve uniquement au POC"). Le desequilibre
+          // (ratio bid/ask >= x8) reste signale, mais uniquement par la couleur du
+          // texte (blanc/vert/rouge, voir plus bas).
+          ctx.globalAlpha=0.5*attenue;
+          ctx.fillStyle='#12161f';
           ctx.fillRect(xL+1, yTop, larg, h);
           ctx.globalAlpha=1;
         }
-        const estPoc=(bar.poc!=null && Math.abs(n.p-bar.poc)<pasPrix*0.5);
+        const estPoc=(bar.poc!=null && Math.abs(n.p-bar.poc)<pasAff*0.5);
         if(estPoc){
           ctx.globalAlpha=attenue;
           ctx.strokeStyle='#00d2ff'; ctx.lineWidth=1.4;
           ctx.strokeRect(xL+1, yTop, larg, h);
           ctx.globalAlpha=1;
         }
-        // texte des cellules : seulement dans le corps (zone meche = fond colore
-        // seul, sans chiffres, pour rester discrete) et si la colonne est assez large
-        if(dansCorps && fpMode!=='profil' && pas>54 && cellPxH>11){
-          ctx.fillStyle='#eef2f7'; ctx.textAlign='center';
-          ctx.font='9.5px ui-monospace,Consolas,monospace';
-          const txt = fpMode==='delta' ? (n.delta>=0?'+':'')+fmtK(n.delta)
-                    : fpMode==='volume' ? fmtK(vol)
-                    : fmtK(n.sell)+' × '+fmtK(n.buy);
+        // texte des cellules : sur TOUTE la hauteur de la bougie, meche comprise ;
+        // taille de police ADAPTATIVE a la largeur reelle de la colonne (pas un seuil
+        // fixe on/off) -- demande explicite du 2026-09-20 : "il faut un juste milieu
+        // entre zoom et dezoom" apres qu'un seuil fixe (pas>34) se soit avere trop
+        // permissif (texte affiche mais chevauchant a colonne trop etroite pour la
+        // police fixe de l'epoque). Une police qui retrecit progressivement avec la
+        // colonne, au lieu de rester figee puis disparaitre d'un coup, EST ce juste
+        // milieu : lisible large, encore visible (en plus petit) modérément dezoome,
+        // seulement masquee en dessous d'un plancher ou plus rien ne tiendrait.
+        // En mode bidask, blanc par defaut -- rouge/vert RESERVE aux niveaux en
+        // desequilibre net (ratio bid/ask >= x8) : "rouge et vert c'est reserve
+        // uniquement quand il y a une imbalance importante, sinon c'est en blanc".
+        const taillePolice=Math.max(6.5, Math.min(11, larg/6.5));
+        if(fpMode!=='profil' && larg>18 && cellPxH>Math.max(9,taillePolice) ){
+          ctx.textAlign='center';
+          ctx.font=taillePolice+'px ui-monospace,Consolas,monospace';
+          let txt, coul;
+          if(fpMode==='delta'){ txt=(n.delta>=0?'+':'')+fmtK(n.delta); coul=n.delta>=0?STYLE.hausse:STYLE.baisse; }
+          else if(fpMode==='volume'){ txt=fmtK(vol); coul='#eef2f7'; }
+          else {
+            txt=fmtK(n.sell)+' × '+fmtK(n.buy);
+            const ratioTxt=Math.max(n.buy,n.sell)/Math.max(1,Math.min(n.buy,n.sell));
+            coul = ratioTxt>=8 ? (n.buy>=n.sell?STYLE.hausse:STYLE.baisse) : '#eef2f7';
+          }
+          ctx.fillStyle=coul;
           ctx.fillText(txt, xC, yC);
           ctx.font='11.5px ui-monospace,Consolas,monospace';
         }
-      });
+      }
       // recontour du corps PAR-DESSUS les cellules, pour qu'il reste net (les
       // cellules dans le corps auraient sinon recouvert son bord).
       if(bougie){
         const x=xC, hausse=bougie.c>=bougie.o, coul=hausse?STYLE.hausse:STYLE.baisse;
         const y1=Y(bougie.o), y2=Y(bougie.c), yTop=Math.min(y1,y2), hCorps=Math.max(1,Math.abs(y2-y1));
-        ctx.strokeStyle=coul; ctx.lineWidth=Math.max(1.5, pas*0.1);
+        ctx.strokeStyle=coul; ctx.lineWidth=1.5;   // meme largeur fixe que dessinerBougies()
         ctx.strokeRect(x-corps/2+ctx.lineWidth/2, yTop+ctx.lineWidth/2, Math.max(1,corps-ctx.lineWidth), Math.max(1,hCorps-ctx.lineWidth));
       }
       // delta de la bougie, au-dessus de la colonne
@@ -5456,36 +5622,43 @@ function dessiner(){
   // un indicateur (IND.fpstats), suit le zoom/pan car recalcule a chaque dessiner().
   function dessinerFootprintStats(){
     if(!FP || !FP.barres || !FP.barres.length || !vue[0]) return;
-    const taille=resMinutes(res)*60000, t0=vue[0].t;
     const y0=gH+hVol, ligne=hStats/4;
     const lignes=['Delta','Volume','Min delta','Max delta'];
 
     // fond + separateurs horizontaux (structure toujours visible, meme si les
-    // colonnes sont trop etroites pour afficher des chiffres)
+    // colonnes sont trop etroites pour afficher des chiffres) -- fond 100% opaque
+    // (pas de rgba/globalAlpha ici) : demande explicite, pas de transparence sur
+    // ce tableau.
+    ctx.globalAlpha=1;
     ctx.fillStyle='#0b0e14'; ctx.fillRect(0, y0, gW, hStats);
-    ctx.strokeStyle='#1c212b'; ctx.lineWidth=1;
+    ctx.strokeStyle='#3a4152'; ctx.lineWidth=1.5;             // bordure haute plus marquee : separe nettement du graphe
     ctx.beginPath(); ctx.moveTo(0,y0+0.5); ctx.lineTo(gW,y0+0.5); ctx.stroke();
+    ctx.strokeStyle='#1c212b'; ctx.lineWidth=1;
     for(let r=1;r<=4;r++){
       const y=y0+r*ligne;
       ctx.beginPath(); ctx.moveTo(0,Math.round(y)+0.5); ctx.lineTo(gW,Math.round(y)+0.5); ctx.stroke();
     }
 
+    // Mapping par egalite exacte de 't' (voir dessinerFootprintCells()) -- marche
+    // aussi bien en mode temporel qu'en mode range.
+    const mapT=new Map();
+    vue.forEach((b,k)=>{ if(b) mapT.set(b.t,k); });
     const visibles=[];
     FP.barres.forEach(bar=>{
-      const k=Math.round((bar.t-t0)/taille);
-      if(k<0||k>=nCol) return;
+      const k=mapT.get(bar.t);
+      if(k===undefined) return;
       visibles.push([bar,k]);
     });
 
-    const assezLarge = pas>32;
+    const assezLarge = pas>26;
     if(assezLarge){
-      ctx.textAlign='center'; ctx.font='9.5px ui-monospace,Consolas,monospace';
+      ctx.textAlign='center'; ctx.font='11px ui-monospace,Consolas,monospace';
       visibles.forEach(([bar,k])=>{
         const xC=k*pas+pas/2;
         const vol=bar.total_buy+bar.total_sell;
         const vals=[bar.delta, vol, bar.min_delta, bar.max_delta];
         for(let r=0;r<4;r++){
-          const yC=y0+r*ligne+ligne/2+3.5;
+          const yC=y0+r*ligne+ligne/2+4;
           if(r===1){ ctx.fillStyle='#c7ccd6'; }          // volume : neutre
           else { ctx.fillStyle=vals[r]>=0?STYLE.hausse:STYLE.baisse; }
           const txt=(r!==1 && vals[r]>0?'+':'')+fmtK(vals[r]);
@@ -5497,12 +5670,12 @@ function dessiner(){
 
     // libellés a gauche, en survol flottant (pas de gouttiere dediee : la grille de
     // colonnes doit rester alignee sur les bougies) avec un fond pour la lisibilite
-    ctx.textAlign='left'; ctx.font='bold 9.5px ui-monospace,Consolas,monospace';
+    ctx.textAlign='left'; ctx.font='bold 11px ui-monospace,Consolas,monospace';
     lignes.forEach((lib,r)=>{
       const yC=y0+r*ligne+ligne/2;
-      const larg=ctx.measureText(lib).width+8;
-      ctx.fillStyle='rgba(11,14,20,.88)'; ctx.fillRect(0, yC-8, larg, 16);
-      ctx.fillStyle='#9aa3b2'; ctx.fillText(lib, 3, yC+3.5);
+      const larg=ctx.measureText(lib).width+10;
+      ctx.fillStyle='#12161f'; ctx.fillRect(0, yC-9, larg, 18);   // opaque (pas de rgba)
+      ctx.fillStyle='#c7ccd6'; ctx.fillText(lib, 4, yC+4);
     });
     ctx.font='11.5px ui-monospace,Consolas,monospace';
   }
@@ -5572,7 +5745,7 @@ function dessiner(){
         ctx.fillStyle=s.c; ctx.fillRect(gW, y-8, MARGE_D, 16);
         ctx.fillStyle='#0b0d12'; ctx.textAlign='left';
         ctx.font='bold 11px ui-monospace,Consolas,monospace';
-        ctx.fillText((estime?'≈':'')+Math.round(val).toLocaleString('fr-FR'), gW+5, y);
+        ctx.fillText((estime?'≈':'')+fmtPrix(val), gW+5, y);
         ctx.font='11.5px ui-monospace,Consolas,monospace';
       } else {
         epingle(val, s.c, estime);              // hors champ : epingle en haut/bas
@@ -5591,7 +5764,7 @@ function dessiner(){
     ctx.setLineDash([]); ctx.globalAlpha=1;
     ctx.fillStyle=n.c; ctx.fillRect(gW, y-8, MARGE_D, 16);
     ctx.fillStyle='#0b0d12'; ctx.textAlign='left'; ctx.font='bold 11px ui-monospace,Consolas,monospace';
-    ctx.fillText(Math.round(n.v).toLocaleString('fr-FR'), gW+5, y);
+    ctx.fillText(fmtPrix(n.v), gW+5, y);
     ctx.font='11.5px ui-monospace,Consolas,monospace';
   });
   }
@@ -5723,7 +5896,7 @@ function dessiner(){
     ctx.fillStyle=hausse?STYLE.hausse:STYLE.baisse;
     ctx.fillRect(gW, y-9, MARGE_D, 18);
     ctx.fillStyle='#0b0d12'; ctx.textAlign='left'; ctx.font='bold 11.5px ui-monospace,Consolas,monospace';
-    ctx.fillText(Math.round(der.c).toLocaleString('fr-FR'), gW+5, y);
+    ctx.fillText(fmtPrix(der.c), gW+5, y);
   }
   }
 
@@ -5738,7 +5911,7 @@ function dessiner(){
     const pCur=lo+(gH-souris.y)/gH*(hi-lo);
     ctx.fillStyle='#262b36'; ctx.fillRect(gW, souris.y-8, MARGE_D, 16);
     ctx.fillStyle='#e8e6e3'; ctx.textAlign='left'; ctx.font='11px ui-monospace,Consolas,monospace';
-    ctx.fillText(Math.round(pCur).toLocaleString('fr-FR'), gW+5, souris.y);
+    ctx.fillText(fmtPrix(pCur), gW+5, souris.y);
 
     const k=Math.floor(souris.x/pas);
     let txt='';
@@ -5746,10 +5919,10 @@ function dessiner(){
       const b=vue[k];
       const c=b.c>=b.o?'#3fd07f':'#e0524f';
       txt='<span style="color:#5b6478;">'+fmtDate(b.t)+'</span>  '
-        +'O <b style="color:'+c+'">'+b.o.toLocaleString('fr-FR')+'</b>  '
-        +'H <b style="color:'+c+'">'+b.h.toLocaleString('fr-FR')+'</b>  '
-        +'B <b style="color:'+c+'">'+b.l.toLocaleString('fr-FR')+'</b>  '
-        +'C <b style="color:'+c+'">'+b.c.toLocaleString('fr-FR')+'</b>';
+        +'O <b style="color:'+c+'">'+fmtPrix(b.o)+'</b>  '
+        +'H <b style="color:'+c+'">'+fmtPrix(b.h)+'</b>  '
+        +'B <b style="color:'+c+'">'+fmtPrix(b.l)+'</b>  '
+        +'C <b style="color:'+c+'">'+fmtPrix(b.c)+'</b>';
     }
     // libelle du niveau UNIQUEMENT si le curseur est proche du trait
     const pCur2=lo+(gH-souris.y)/gH*(hi-lo);
@@ -5758,13 +5931,13 @@ function dessiner(){
                      .sort((a,b)=>Math.abs(b.gex_musd)-Math.abs(a.gex_musd))[0];
     if(stProche){
       txt+='<span class="niv" style="color:'+(stProche.gex_musd>=0?'#3fd07f':'#e0524f')+'">'
-        +'\u25ac Strike '+Math.round(stProche.strike).toLocaleString('fr-FR')
+        +'\u25ac Strike '+fmtPrix(stProche.strike)
         +' \u00b7 GEX '+(stProche.gex_musd>=0?'+':'')+stProche.gex_musd+'M$</span>';
     }
     const proche=NIV.filter(n=>n.v>=lo&&n.v<=hi&&Math.abs(Y(n.v)-souris.y)<8);
     if(proche.length){
       txt+=proche.map(n=>'<span class="niv" style="color:'+n.c+'">\u25ac '+n.t
-           +' \u00b7 '+Math.round(n.v).toLocaleString('fr-FR')+'</span>').join('');
+           +' \u00b7 '+fmtPrix(n.v)+'</span>').join('');
     }
     info.innerHTML=txt;
   } else { info.innerHTML=''; }
@@ -5996,7 +6169,12 @@ class Handler(BaseHTTPRequestHandler):
                     fp_res = kv[4:]
                 elif kv.startswith("heures="):
                     try:
-                        fp_heures = max(1, min(24, float(kv[7:])))
+                        # plafond a 24h herite de la toute premiere version (Etape A,
+                        # avant l'archive+deep backfill) : bridait silencieusement tout
+                        # client demandant plus, y compris la vue par defaut du graphe
+                        # (120 bougies en 1h = 120h) -- aligne sur le plafond cote client
+                        # (chargerFootprint(), 720h = 30j, l'archive va jusqu'a 180j).
+                        fp_heures = max(1, min(720, float(kv[7:])))
                     except ValueError:
                         pass
                 elif kv.startswith("source="):
@@ -6021,6 +6199,46 @@ class Handler(BaseHTTPRequestHandler):
             a = _up.unquote(a).upper()
             try:
                 data = fe.price_candles(a, res)
+                self._send(200, json.dumps(data or {}).encode(), "application/json")
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
+            return
+        if path.startswith("/api/candles_range/"):
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            rg, heures_rg = None, 48
+            for kv in qs.split("&"):
+                if kv.startswith("range="):
+                    try: rg = float(kv[6:])
+                    except ValueError: pass
+                elif kv.startswith("heures="):
+                    try: heures_rg = max(1, min(720, float(kv[7:])))
+                    except ValueError: pass
+            a = path.split("/api/candles_range/", 1)[1].split("?")[0]
+            import urllib.parse as _up
+            a = _up.unquote(a).upper()
+            try:
+                data = fe.range_candles(a, rg, heures=heures_rg)
+                self._send(200, json.dumps(data or {}).encode(), "application/json")
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")
+            return
+        if path.startswith("/api/footprint_range/"):
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            rg, heures_rg, src_rg = None, 48, "binance"
+            for kv in qs.split("&"):
+                if kv.startswith("range="):
+                    try: rg = float(kv[6:])
+                    except ValueError: pass
+                elif kv.startswith("heures="):
+                    try: heures_rg = max(1, min(720, float(kv[7:])))
+                    except ValueError: pass
+                elif kv.startswith("source="):
+                    src_rg = kv[7:]
+            a = path.split("/api/footprint_range/", 1)[1].split("?")[0]
+            import urllib.parse as _up
+            a = _up.unquote(a).upper()
+            try:
+                data = fe.range_footprint(a, rg, heures=heures_rg, source=src_rg)
                 self._send(200, json.dumps(data or {}).encode(), "application/json")
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}).encode(), "application/json")

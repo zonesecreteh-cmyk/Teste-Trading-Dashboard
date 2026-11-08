@@ -1,5 +1,3 @@
-{"ts": "2026-10-24T18:33:29.523482+00:00", "exchange": "OKX", "side": "short", "price": 75.873, "qty": 1.0, "usd": null}
-{"ts": "2026-10-24T23:31:54.712897+00:00", "exchange": "OKX", "side": "short", "price": 76.567, "qty": 480.0, "usd": null}
 {"ts": "2026-10-25T00:24:40.580942+00:00", "exchange": "OKX", "side": "short", "price": 76.639, "qty": 22.0, "usd": null}
 {"ts": "2026-10-25T15:33:54.517049+00:00", "exchange": "OKX", "side": "short", "price": 77.195, "qty": 240.0, "usd": null}
 {"ts": "2026-10-25T21:39:53.129081+00:00", "exchange": "OKX", "side": "long", "price": 76.609, "qty": 15.0, "usd": null}
@@ -611,3 +609,12 @@
 {"ts": "2026-11-07T16:14:22.165162+00:00", "exchange": "OKX", "side": "long", "price": 77.213, "qty": 881.0, "usd": null}
 {"ts": "2026-11-07T16:46:50.834900+00:00", "exchange": "OKX", "side": "long", "price": 77.224, "qty": 363.0, "usd": null}
 {"ts": "2026-11-07T16:54:54.627323+00:00", "exchange": "OKX", "side": "short", "price": 79.422, "qty": 118.0, "usd": null}
+{"ts": "2026-11-07T20:46:10.313770+00:00", "exchange": "OKX", "side": "long", "price": 77.035, "qty": 59.0, "usd": null}
+{"ts": "2026-11-07T20:46:16.803358+00:00", "exchange": "OKX", "side": "long", "price": 77.021, "qty": 430.0, "usd": null}
+{"ts": "2026-11-07T20:47:36.053778+00:00", "exchange": "OKX", "side": "long", "price": 76.979, "qty": 44.0, "usd": null}
+{"ts": "2026-11-07T20:47:36.163823+00:00", "exchange": "OKX", "side": "long", "price": 77.009, "qty": 7.0, "usd": null}
+{"ts": "2026-11-07T20:48:13.212215+00:00", "exchange": "OKX", "side": "long", "price": 76.959, "qty": 139.0, "usd": null}
+{"ts": "2026-11-07T20:51:24.137226+00:00", "exchange": "OKX", "side": "long", "price": 76.885, "qty": 10.0, "usd": null}
+{"ts": "2026-11-07T20:52:29.670216+00:00", "exchange": "OKX", "side": "long", "price": 76.843, "qty": 4.0, "usd": null}
+{"ts": "2026-11-07T21:31:15.237358+00:00", "exchange": "OKX", "side": "long", "price": 76.849, "qty": 26.0, "usd": null}
+{"ts": "2026-11-07T21:31:16.156368+00:00", "exchange": "OKX", "side": "long", "price": 76.857, "qty": 512.0, "usd": null}

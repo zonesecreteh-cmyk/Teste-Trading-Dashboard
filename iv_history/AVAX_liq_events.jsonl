@@ -178,3 +178,5 @@
 {"ts": "2026-11-15T14:41:24.601235+00:00", "exchange": "OKX", "side": "long", "price": 7.121, "qty": 112.0, "usd": null}
 {"ts": "2026-11-15T18:51:20.707255+00:00", "exchange": "OKX", "side": "long", "price": 7.149, "qty": 14.0, "usd": null}
 {"ts": "2026-11-15T20:31:49.845609+00:00", "exchange": "OKX", "side": "short", "price": 7.261, "qty": 168.6, "usd": null}
+{"ts": "2026-11-16T17:17:52.714819+00:00", "exchange": "OKX", "side": "short", "price": 7.214, "qty": 84.8, "usd": null}
+{"ts": "2026-11-16T23:30:48.743446+00:00", "exchange": "OKX", "side": "long", "price": 7.086, "qty": 6.6, "usd": null}

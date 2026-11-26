@@ -1,0 +1,143 @@
+RAPPORT FLOW ENGINE — 2026-11-26  [moteur 2026-08-26-k]
+====================================================================
+
+CONTEXTE : RISK-ON  (vote +3 sur 4)
+  SPX 5j +3.00% · BTC 5j +0.66% · $ proxy 5j +0.06% · Or 5j -3.17%
+  Corrélation BTC/SPX : 0.59 sur 88j
+
+VERDICTS (horizon mensuel) :
+  BTC   BAISSIER  FAIBLE   score  -4.0 | GEX total -62.6M$ | spot 60,624.56 | max pain 68000.0
+  ETH   NEUTRE    NEUTRE   score  -3.1 | GEX total -3.3M$ | spot 1,701.53 | max pain 1800.0
+  SPY   BAISSIER  FAIBLE   score  -4.0 | GEX total -9682.2M$ | spot 720.2 | max pain 730.0
+  QQQ   BAISSIER  FAIBLE   score  -4.0 | GEX total -4556.1M$ | spot 636.86 | max pain 660.0
+  GC    BAISSIER  FAIBLE   score  -4.0 | GEX total -452.3M$ | spot 326.51 | max pain 345.0
+
+A REGARDER EN PRIORITE :
+
+  --- BTC ---
+  [85] Regime d'AMPLIFICATION (gamma negatif)
+        GEX -52M$. Les dealers sont du mauvais cote du gamma : quand le prix monte ils doivent acheter, quand il baisse ils doivent vendre. Leur couverture POUSSE le mouvement au lieu de le freiner. Les bornes du jour : mur put $58,000 en bas, mur call $66,000 en haut.
+        -> Concretement : les cassures ont plus de chances d'aller au bout, les retours a la moyenne echouent plus souvent. Privilegier le suivi de tendance, entrer sur cassure plutot que sur repli. Elargir les stops (la volatilite realisee sera superieure a l'ordinaire) et reduire la taille pour compenser.
+        A surveiller : Un retour du GEX en territoire positif : le regime redeviendrait amorti.
+  [78] Poche de liquidations a 3.0% du spot
+        Environ 3,626M$ de positions shorts seraient liquidees vers $62,486 (au-dessus du spot). Estimation basee sur la distribution de levier, pas sur des positions reelles.
+        -> Concretement : si le prix atteint cette zone, les liquidations forcees alimentent le mouvement dans le sens de la hausse — c'est un accelerateur, pas un support. Deux implications : cette zone agit comme un aimant (le marche va souvent chercher la liquidite ou elle se trouve), et c'est le pire endroit pour placer un stop, car il sera balaye par la cascade. Placer les stops AU-DELA de la poche, pas dedans.
+        A surveiller : Le passage du prix dans la zone : si elle est traversee sans acceleration, l'estimation etait fausse ou la poche deja purgee.
+
+  --- ETH ---
+  [85] Regime d'AMPLIFICATION (gamma negatif)
+        GEX -3M$. Les dealers sont du mauvais cote du gamma : quand le prix monte ils doivent acheter, quand il baisse ils doivent vendre. Leur couverture POUSSE le mouvement au lieu de le freiner. Les bornes du jour : mur put $1,600 en bas, mur call $1,800 en haut.
+        -> Concretement : les cassures ont plus de chances d'aller au bout, les retours a la moyenne echouent plus souvent. Privilegier le suivi de tendance, entrer sur cassure plutot que sur repli. Elargir les stops (la volatilite realisee sera superieure a l'ordinaire) et reduire la taille pour compenser.
+        A surveiller : Un retour du GEX en territoire positif : le regime redeviendrait amorti.
+  [78] Poche de liquidations a 2.0% du spot
+        Environ 1,862M$ de positions shorts seraient liquidees vers $1,737 (au-dessus du spot). Estimation basee sur la distribution de levier, pas sur des positions reelles.
+        -> Concretement : si le prix atteint cette zone, les liquidations forcees alimentent le mouvement dans le sens de la hausse — c'est un accelerateur, pas un support. Deux implications : cette zone agit comme un aimant (le marche va souvent chercher la liquidite ou elle se trouve), et c'est le pire endroit pour placer un stop, car il sera balaye par la cascade. Placer les stops AU-DELA de la poche, pas dedans.
+        A surveiller : Le passage du prix dans la zone : si elle est traversee sans acceleration, l'estimation etait fausse ou la poche deja purgee.
+
+  --- SPY ---
+  [85] Regime d'AMPLIFICATION (gamma negatif)
+        GEX -5,937M$. Les dealers sont du mauvais cote du gamma : quand le prix monte ils doivent acheter, quand il baisse ils doivent vendre. Leur couverture POUSSE le mouvement au lieu de le freiner. Les bornes du jour : mur put $700 en bas, mur call $750 en haut.
+        -> Concretement : les cassures ont plus de chances d'aller au bout, les retours a la moyenne echouent plus souvent. Privilegier le suivi de tendance, entrer sur cassure plutot que sur repli. Elargir les stops (la volatilite realisee sera superieure a l'ordinaire) et reduire la taille pour compenser.
+        A surveiller : Un retour du GEX en territoire positif : le regime redeviendrait amorti.
+
+  --- QQQ ---
+  [85] Regime d'AMPLIFICATION (gamma negatif)
+        GEX -2,421M$. Les dealers sont du mauvais cote du gamma : quand le prix monte ils doivent acheter, quand il baisse ils doivent vendre. Leur couverture POUSSE le mouvement au lieu de le freiner. Les bornes du jour : mur put $635 en bas, mur call $680 en haut.
+        -> Concretement : les cassures ont plus de chances d'aller au bout, les retours a la moyenne echouent plus souvent. Privilegier le suivi de tendance, entrer sur cassure plutot que sur repli. Elargir les stops (la volatilite realisee sera superieure a l'ordinaire) et reduire la taille pour compenser.
+        A surveiller : Un retour du GEX en territoire positif : le regime redeviendrait amorti.
+
+  --- GC ---
+  [85] Regime d'AMPLIFICATION (gamma negatif)
+        GEX -103M$. Les dealers sont du mauvais cote du gamma : quand le prix monte ils doivent acheter, quand il baisse ils doivent vendre. Leur couverture POUSSE le mouvement au lieu de le freiner. Les bornes du jour : mur put $325 en bas, mur call $339 en haut.
+        -> Concretement : les cassures ont plus de chances d'aller au bout, les retours a la moyenne echouent plus souvent. Privilegier le suivi de tendance, entrer sur cassure plutot que sur repli. Elargir les stops (la volatilite realisee sera superieure a l'ordinaire) et reduire la taille pour compenser.
+        A surveiller : Un retour du GEX en territoire positif : le regime redeviendrait amorti.
+
+CE QUI A CHANGÉ DEPUIS HIER :
+   !! [BTC] Flux client s'inverse : clients acheteurs nets d'options (+35.3M$)
+        -> les dealers prennent l'autre côté — leur hedge change de sens
+   !! [ETH] Max pain déplacé de -5.3% : $1,900 → $1,800
+        -> l'aimant du marché s'est déplacé — souvent après une grosse expiration
+   !! [ETH] Flux client s'inverse : clients vendeurs nets d'options (-5.9M$)
+        -> les dealers prennent l'autre côté — leur hedge change de sens
+    · [ETH] Sens de la vol : clients acheteurs de volatilité (+7%)
+        -> détermine si les dealers sont long ou short vega
+   !! [SOL] Verdict : BAISSIER FAIBLE → NEUTRE NEUTRE
+        -> l'alignement des niveaux directionnels a changé
+   !! [XRP] Verdict : BAISSIER FAIBLE → NEUTRE NEUTRE
+        -> l'alignement des niveaux directionnels a changé
+   !! [XRP] Skew 25Δ s'inverse : -3.03 → +2.81
+        -> bascule entre demande de protection (puts) et spéculation (calls)
+  !!! [AVAX] GEX passe NÉGATIF (amplification) : +0.7 → -0.2M$
+        -> les dealers changent de comportement : ils amplifient au lieu d'absorber (ou l'inverse)
+  !!! [AVAX] Spot casse SOUS le gamma flip ($7)
+        -> au-dessus = marché amorti, en-dessous = mouvements amplifiés
+   !! [AVAX] Verdict : NEUTRE NEUTRE → BAISSIER FAIBLE
+        -> l'alignement des niveaux directionnels a changé
+   !! [AVAX] Max pain déplacé de -6.2% : $8 → $8
+        -> l'aimant du marché s'est déplacé — souvent après une grosse expiration
+   !! [TRX] Skew 25Δ s'inverse : -0.09 → +0.59
+        -> bascule entre demande de protection (puts) et spéculation (calls)
+   !! [NDX] Verdict : BAISSIER FAIBLE → NEUTRE NEUTRE
+        -> l'alignement des niveaux directionnels a changé
+   !! [VIX] IV 30j -5.2 pts : 113.3% → 108.1%
+        -> hausse = le marché price plus de risque ; baisse = complaisance
+   !! [SMH] Max pain déplacé de -3.1% : $490 → $475
+        -> l'aimant du marché s'est déplacé — souvent après une grosse expiration
+   !! [SLV] Verdict : BAISSIER FAIBLE → NEUTRE NEUTRE
+        -> l'alignement des niveaux directionnels a changé
+   !! [CL] Verdict : BAISSIER MODÉRÉE → NEUTRE NEUTRE
+        -> l'alignement des niveaux directionnels a changé
+   !! [CL] Skew 25Δ s'inverse : -0.22 → +0.80
+        -> bascule entre demande de protection (puts) et spéculation (calls)
+   !! [UNG] Max pain déplacé de +5.3% : $10 → $10
+        -> l'aimant du marché s'est déplacé — souvent après une grosse expiration
+   !! [UUP] Max pain déplacé de -3.3% : $30 → $29
+        -> l'aimant du marché s'est déplacé — souvent après une grosse expiration
+
+ALERTES :
+  ⚠ BTC: poche de liquidations shorts ~3626.3M$ à $62,486.0 (3.0% du spot)
+  ⚠ BTC: OI puts en fort mouvement (-19239 / -49059 contrats vs 2026-11-25)
+  ⚠ ETH: poche de liquidations shorts ~1861.7M$ à $1,736.8 (2.0% du spot)
+  ⚠ ETH: volume sous-jacent x0.43 seulement -> mouvement peu credible, mefiance
+  ⚠ ETH: OI puts en fort mouvement (-76672 / -81613 contrats vs 2026-11-25)
+  ⚠ SOL: poche de liquidations shorts ~350.9M$ à $73.353 (3.0% du spot)
+  ⚠ SOL: volume sous-jacent x0.46 seulement -> mouvement peu credible, mefiance
+  ⚠ SOL: OI puts en fort mouvement (-45970 / -91590 contrats vs 2026-11-25)
+  ⚠ XRP: poche de liquidations shorts ~125.6M$ à $0.97038 (2.1% du spot)
+  ⚠ XRP: volume sous-jacent x0.43 seulement -> mouvement peu credible, mefiance
+  ⚠ XRP: OI calls en fort mouvement (-5743000 / -4318000 contrats vs 2026-11-25)
+  ⚠ AVAX: volume sous-jacent x0.11 seulement -> mouvement peu credible, mefiance
+  ⚠ AVAX: OI puts en fort mouvement (-127600 / -184000 contrats vs 2026-11-25)
+  ⚠ TRX: OI calls en fort mouvement (-3480000 / -1960000 contrats vs 2026-11-25)
+  ⚠ HYPE: poche de liquidations shorts ~119.9M$ à $64.29 (3.0% du spot)
+  ⚠ HYPE: OI puts en fort mouvement (-51580 / -81080 contrats vs 2026-11-25)
+  ⚠ SPX: OI calls en fort mouvement (-189622 / -109755 contrats vs 2026-11-25)
+  ⚠ VIX: OI calls en fort mouvement (-107943 / -701 contrats vs 2026-11-25)
+  ⚠ SPY: OI calls en fort mouvement (+19626 / -13826 contrats vs 2026-11-25)
+  ⚠ QQQ: OI calls en fort mouvement (+122210 / -28792 contrats vs 2026-11-25)
+  ⚠ IWM: OI puts en fort mouvement (+39688 / -56445 contrats vs 2026-11-25)
+  ⚠ XLF: OI calls en fort mouvement (+22652 / -11 contrats vs 2026-11-25)
+  ⚠ XLE: OI puts en fort mouvement (+19533 / -23069 contrats vs 2026-11-25)
+  ⚠ SMH: OI calls en fort mouvement (+21494 / +2154 contrats vs 2026-11-25)
+  ⚠ EWG: activite options x1.77 vs moyenne 20j (2,992 contrats) -> attention inhabituelle sur cet actif
+  ⚠ EWQ: activite options x2.38 vs moyenne 20j (634 contrats) -> attention inhabituelle sur cet actif
+  ⚠ GC: OI puts en fort mouvement (+968 / -41181 contrats vs 2026-11-25)
+  ⚠ SLV: OI puts en fort mouvement (+5836 / +17205 contrats vs 2026-11-25)
+  ⚠ UUP: spot à 0.1% du gamma flip -> zone de bascule de régime
+  ⚠ TLT: OI calls en fort mouvement (-46716 / +2995 contrats vs 2026-11-25)
+  ⚠ HYG: spot à 1.0% du gamma flip -> zone de bascule de régime
+  ⚠ HYG: activite options x1.62 vs moyenne 20j (510,998 contrats) -> attention inhabituelle sur cet actif
+  ⚠ HYG: OI puts en fort mouvement (+26 / -198498 contrats vs 2026-11-25)
+
+SANTÉ DES COLLECTEURS :
+  [OK ] Historique quotidien (daily.py)        2026-11-26 (aujourd'hui)
+  [OK ] Photos OI par strike                   2026-11-26 (aujourd'hui)
+  [OK ] Tape (signe empirique)                 2026-11-26 (aujourd'hui)
+  [OK ] IV quotidienne (rank/percentile)       2026-11-26 (aujourd'hui)
+  [OK ] Book total (courbe)                    2026-11-26 (aujourd'hui)
+  [OK ] Snapshots JSON (archive)               2026-11-26 (aujourd'hui)
+  [OK ] Footprint order flow (Binance, collecteur) 2026-11-26 20h29 UTC (aujourd'hui)
+  [OK ] Footprint — rattrapage archives officielles 79 complet(s) · 0 provisoire(s) · 0 manquant(s) (sur 79 jour(s) attendu(s)) (aujourd'hui)
+
+====================================================================
+Rappel : outil d'aide à la lecture du positionnement, pas un signal de trading.
